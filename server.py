@@ -121,9 +121,11 @@ def get_current_perm() -> str:
 
 
 def set_current_perm(perm_value: str, session_id: Optional[str] = None) -> bool:
-    """修改 preferences.json 中的权限并持久化到本地桌面应用配置中"""
+    """修改 preferences.json 中的权限并持久化到本地桌面应用配置中，同时直接同步至 mimocode.db 的 session.permission 规则"""
     if perm_value not in ("完全访问权限", "帮我审批", "默认权限"):
         return False
+
+    # 1. 持久化到 preferences.json
     if os.path.exists(PREFERENCES_PATH):
         try:
             with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
@@ -135,11 +137,29 @@ def set_current_perm(perm_value: str, session_id: Optional[str] = None) -> bool:
                 p["permByConvo"][session_id] = perm_value
             with open(PREFERENCES_PATH, "w", encoding="utf-8") as f:
                 json.dump(p, f, indent=2, ensure_ascii=False)
-            return True
         except Exception as e:
             print("Error updating preferences.json perm:", e)
-            return False
-    return False
+
+    # 2. 同步更新 SQLite mimocode.db 的 session.permission 规则
+    if os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=5)
+            c = conn.cursor()
+            rules = None
+            if perm_value == "完全访问权限":
+                rules = json.dumps([{"permission": "*", "pattern": "*", "action": "allow"}])
+            elif perm_value == "帮我审批":
+                rules = json.dumps([{"permission": "edit", "pattern": "*", "action": "allow"}])
+            if session_id:
+                c.execute("UPDATE session SET permission = ? WHERE id = ?", (rules, session_id))
+            else:
+                c.execute("UPDATE session SET permission = ?", (rules,))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print("Error updating mimocode.db session permission:", e)
+    return True
+
 
 
 def categorize_artifact(ext: str) -> Tuple[str, str]:
@@ -831,12 +851,18 @@ def create_new_mimo_session_in_db(title: str = "新任务会话", directory: str
     if os.path.exists(MIMO_DB_PATH):
         conn = sqlite3.connect(MIMO_DB_PATH, timeout=5)
         c = conn.cursor()
+        cur_p = get_current_perm()
+        perm_rules = None
+        if cur_p == "完全访问权限":
+            perm_rules = json.dumps([{"permission": "*", "pattern": "*", "action": "allow"}])
+        elif cur_p == "帮我审批":
+            perm_rules = json.dumps([{"permission": "edit", "pattern": "*", "action": "allow"}])
         c.execute(
             """
-            INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated)
-            VALUES (?, "global", NULL, "new-session", ?, ?, "2.1.159", ?, ?)
+            INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, permission, time_created, time_updated)
+            VALUES (?, "global", NULL, "new-session", ?, ?, "2.1.159", ?, ?, ?)
         """,
-            (new_id, directory, title, now, now),
+            (new_id, directory, title, perm_rules, now, now),
         )
         conn.commit()
         conn.close()
@@ -1702,12 +1728,47 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
     .tool-status {
       font-size: 11px;
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-weight: 500;
+      flex-shrink: 0;
     }
-    .tool-status.running { color: #0284C7; }
-    .tool-status.completed { color: #16A34A; }
+    .tool-status.running {
+      color: #0284C7;
+      background: rgba(2, 132, 199, 0.08);
+    }
+    .tool-status.running .tool-status-icon {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: #0284C7;
+      box-shadow: 0 0 0 0 rgba(2, 132, 199, 0.6);
+      animation: toolPulseDot 1.4s infinite cubic-bezier(0.66, 0, 0, 1);
+      display: inline-block;
+    }
+    @keyframes toolPulseDot {
+      to {
+        box-shadow: 0 0 0 7px rgba(2, 132, 199, 0);
+      }
+    }
+    .tool-status.completed {
+      color: #16A34A;
+      background: rgba(22, 163, 74, 0.08);
+    }
+    .tool-status.completed .tool-status-icon {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background-color: #16A34A;
+      display: inline-block;
+    }
+    .tool-status.error, .tool-status.failed {
+      color: #DC2626;
+      background: rgba(220, 38, 38, 0.08);
+    }
     .tool-console-box {
       background: #0F172A;
       color: #F8FAFC;
@@ -1718,6 +1779,99 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-all;
+    }
+
+    /* 现代交互式动态思考/执行状态卡片 */
+    .mimo-thinking-card {
+      background: linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.94));
+      border: 1px solid rgba(226, 232, 240, 0.85);
+      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.03);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin: 8px 0 10px 0;
+      position: relative;
+      overflow: hidden;
+      animation: fadeInThinking 0.3s ease-out;
+    }
+    @keyframes fadeInThinking {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .mimo-thinking-card::before {
+      content: "";
+      position: absolute;
+      top: 0; left: -100%; width: 50%; height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent);
+      animation: thinkingShimmer 2.2s infinite ease-in-out;
+      pointer-events: none;
+    }
+    @keyframes thinkingShimmer {
+      0% { left: -100%; }
+      100% { left: 200%; }
+    }
+    .thinking-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .thinking-spinner-ring {
+      width: 16px;
+      height: 16px;
+      border: 2px solid rgba(2, 132, 199, 0.2);
+      border-top-color: #0284C7;
+      border-radius: 50%;
+      animation: spinThinking 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+    @keyframes spinThinking {
+      to { transform: rotate(360deg); }
+    }
+    .thinking-status-text {
+      font-size: 13px;
+      font-weight: 600;
+      color: #1E293B;
+      letter-spacing: -0.2px;
+    }
+    .typing-bouncing-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 2px;
+    }
+    .typing-bouncing-dots span {
+      width: 4px;
+      height: 4px;
+      background-color: #0284C7;
+      border-radius: 50%;
+      animation: bounceDot 1.4s infinite ease-in-out both;
+    }
+    .typing-bouncing-dots span:nth-child(1) { animation-delay: -0.32s; }
+    .typing-bouncing-dots span:nth-child(2) { animation-delay: -0.16s; }
+    .typing-bouncing-dots span:nth-child(3) { animation-delay: 0s; }
+    @keyframes bounceDot {
+      0%, 80%, 100% { transform: scale(0.6); opacity: 0.35; }
+      40% { transform: scale(1.15); opacity: 1; }
+    }
+    .thinking-badge-timer {
+      margin-left: auto;
+      font-size: 11px;
+      font-family: var(--font-mono);
+      color: #0284C7;
+      background: rgba(2, 132, 199, 0.08);
+      padding: 2px 7px;
+      border-radius: 10px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .thinking-sub-desc {
+      margin-top: 6px;
+      font-size: 11.5px;
+      color: #64748B;
+      line-height: 1.4;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: color 0.2s ease;
     }
 
     /* 助手消息底部的真实操作栏 */
@@ -4160,20 +4314,101 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       box.querySelector(".thinking-content").textContent = text;
     }
 
+    let thinkingInterval = null;
+    let busyStartTime = 0;
+
+    function showThinkingCard(wrap, initialText, initialSub) {
+      removeThinkingCard(wrap);
+      const card = document.createElement("div");
+      card.className = "mimo-thinking-card";
+      card.id = "active-thinking-card";
+      card.innerHTML = `
+        <div class="thinking-header">
+          <div class="thinking-spinner-ring"></div>
+          <span class="thinking-status-text">${escapeHtml(initialText || "MiMo 正在深度思考")}</span>
+          <div class="typing-bouncing-dots">
+            <span></span><span></span><span></span>
+          </div>
+          <span class="thinking-badge-timer">0.0s</span>
+        </div>
+        <div class="thinking-sub-desc">${escapeHtml(initialSub || "已连接本地引擎，模型正在构思方案...")}</div>
+      `;
+      wrap.appendChild(card);
+      const startTime = Date.now();
+      if (thinkingInterval) clearInterval(thinkingInterval);
+      thinkingInterval = setInterval(() => {
+        const timerEl = card.querySelector(".thinking-badge-timer");
+        if (timerEl) {
+          const sec = ((Date.now() - startTime) / 1000).toFixed(1);
+          timerEl.textContent = sec + "s";
+        }
+        const subEl = card.querySelector(".thinking-sub-desc");
+        const elapsed = (Date.now() - startTime) / 1000;
+        if (subEl && !card.dataset.customSub) {
+          if (elapsed < 3) {
+            subEl.textContent = "已建立引擎通道，等待模型首字响应...";
+          } else if (elapsed < 8) {
+            subEl.textContent = "模型正在进行多步推理与上下文分析...";
+          } else if (elapsed < 16) {
+            subEl.textContent = "正在分析任务逻辑，准备调度工具或生成方案...";
+          } else {
+            subEl.textContent = "正在深度运算中，请耐心等待...";
+          }
+        }
+      }, 100);
+      const vp = document.getElementById("chat-viewport");
+      vp.scrollTop = vp.scrollHeight;
+      return card;
+    }
+
+    function updateThinkingCard(wrap, statusText, subDesc) {
+      if (!wrap) return;
+      const card = wrap.querySelector(".mimo-thinking-card");
+      if (!card) return;
+      if (statusText) {
+        const stEl = card.querySelector(".thinking-status-text");
+        if (stEl) stEl.textContent = statusText;
+      }
+      if (subDesc) {
+        card.dataset.customSub = "1";
+        const subEl = card.querySelector(".thinking-sub-desc");
+        if (subEl) subEl.textContent = subDesc;
+      }
+    }
+
+    function removeThinkingCard(wrap) {
+      if (thinkingInterval) {
+        clearInterval(thinkingInterval);
+        thinkingInterval = null;
+      }
+      if (wrap) {
+        const card = wrap.querySelector(".mimo-thinking-card");
+        if (card) card.remove();
+      } else {
+        const card = document.getElementById("active-thinking-card");
+        if (card) card.remove();
+      }
+    }
+
     function addToolCard(wrap, callId, tool, status, inputData, outputData) {
       let card = activeToolsMap[callId];
+      const desc = inputData?.command || inputData?.path || inputData?.query || inputData?.description || (typeof inputData === "string" ? inputData : JSON.stringify(inputData || {}));
+      const isRunning = status === "running";
+      const isCompleted = status === "completed";
+      const labelText = isRunning ? "运行中..." : (isCompleted ? "已完成" : (status || "运行中"));
+
       if (!card) {
         card = document.createElement("div");
         card.className = "mimo-tool-card";
-        const desc = inputData?.command || inputData?.path || inputData?.description || JSON.stringify(inputData || {});
         card.innerHTML = `
           <div class="tool-header-row" onclick="const b=this.parentElement.querySelector('.tool-console-box');if(b)b.style.display=b.style.display==='none'?'block':'none'">
-            <div style="display:flex;align-items:center;min-width:0;">
-              <span class="tool-badge">${(tool || "TOOL").toUpperCase()}</span>
-              <span class="tool-cmd-preview">${desc}</span>
+            <div style="display:flex;align-items:center;min-width:0;flex:1;margin-right:8px;">
+              <span class="tool-badge">${escapeHtml((tool || "TOOL").toUpperCase())}</span>
+              <span class="tool-cmd-preview" title="${escapeHtml(desc)}">${escapeHtml(desc)}</span>
             </div>
             <div class="tool-status ${status || 'running'}">
-              <span>●</span> <span class="st-text">${status || 'running'}</span>
+              <span class="tool-status-icon"></span>
+              <span class="st-text">${labelText}</span>
             </div>
           </div>
           <div class="tool-console-box" style="display:${outputData ? 'block' : 'none'};"></div>
@@ -4184,7 +4419,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
       const stEl = card.querySelector(".tool-status");
       stEl.className = "tool-status " + (status || "running");
-      card.querySelector(".st-text").textContent = status || "running";
+      card.querySelector(".st-text").textContent = labelText;
 
       if (outputData) {
         const consoleBox = card.querySelector(".tool-console-box");
@@ -4222,11 +4457,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           const msgs = await r.json();
           if (Array.isArray(msgs) && msgs.length > 0) {
             const last = msgs[msgs.length - 1];
-            if (last.role === "assistant") {
+            const info = last.info || {};
+            if (info.role === "assistant") {
               const parts = last.parts || [];
-              const hasFinish = parts.some(p => p.type === "step-finish" || p.finish || p.reason === "stop");
-              if (hasFinish) {
+              const hasRunningTool = parts.some(p => p.type === "tool" && p.state?.status === "running");
+              const isDone = (info.finish === "stop" || (info.time && info.time.completed)) && !hasRunningTool;
+              if (isDone) {
                 stopBusyWatch();
+                removeThinkingCard(activeAssistantBox);
                 setBusy(false);
                 loadHistoricalMessages(sid, false);
                 loadSessionsList();
@@ -4235,8 +4473,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             }
           }
         } catch(e) {}
-        if (count > 180) { // 超过 4.5 分钟超时兜底
+        if (count > 240) { // 6 分钟超时兜底
           stopBusyWatch();
+          removeThinkingCard(activeAssistantBox);
           setBusy(false);
         }
       }, 1500);
@@ -4269,10 +4508,12 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
       input.value = "";
       input.style.height = "auto";
+      busyStartTime = Date.now();
       setBusy(true);
 
       activeAssistantBox = appendAssistantBox();
-      activeProseCard = addProseText(activeAssistantBox, "思考中...");
+      activeProseCard = null;
+      showThinkingCard(activeAssistantBox, "MiMo 正在深度思考", "已连接本地引擎，模型正在构思方案...");
 
       // 确保 SSE 已连接（发送消息前 SSE 就应已建立，这里是双保险）
       if (!activeSseSource || activeSseSource.readyState === EventSource.CLOSED) {
@@ -4303,19 +4544,24 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         }
         if (!r.ok) {
           stopBusyWatch();
-          activeProseCard.innerHTML = "❌ 调度出错: " + (res.error || "未知错误");
+          removeThinkingCard(activeAssistantBox);
+          activeProseCard = addProseText(activeAssistantBox, "❌ 调度出错: " + (res.error || "未知错误"));
           setBusy(false);
         }
       } catch (e) {
         stopBusyWatch();
-        activeProseCard.innerHTML = "❌ 请求失败: " + e.message;
+        removeThinkingCard(activeAssistantBox);
+        activeProseCard = addProseText(activeAssistantBox, "❌ 请求失败: " + e.message);
         setBusy(false);
       }
     }
 
     function setBusy(busy) {
       isBusy = busy;
-      if (!busy) stopBusyWatch();
+      if (!busy) {
+        stopBusyWatch();
+        removeThinkingCard(activeAssistantBox);
+      }
       const btn = document.getElementById("btn-dock-send");
       if (busy) {
         btn.classList.add("abort");
@@ -4329,7 +4575,12 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
 
     async function abortTask() {
+      if (Date.now() - busyStartTime < 1500) {
+        // 防抖：防止发送时的连击误触中断
+        return;
+      }
       stopBusyWatch();
+      removeThinkingCard(activeAssistantBox);
       try {
         await fetch("/api/abort", {
           method: "POST",
@@ -4357,6 +4608,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         // ── 文本流（累积全文，每次覆盖）──────────────────────────
         if (type === "text-partial" && typeof ev.text === "string") {
           if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
+          removeThinkingCard(activeAssistantBox);
           activeProseCard = addProseText(activeAssistantBox, ev.text);
 
         // ── ui 事件（tool / text / title / usage）───────────────
@@ -4366,19 +4618,30 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
           if (ui.kind === "text" && typeof ui.text === "string") {
             // 最终文本（与 text-partial 同源，已是全文）
+            removeThinkingCard(activeAssistantBox);
             activeProseCard = addProseText(activeAssistantBox, ui.text);
 
           } else if (ui.kind === "tool") {
             // 工具调用卡片实时更新
             const out = ui.output || "";
             addToolCard(activeAssistantBox, ui.callID, ui.tool, ui.status, ui.input, out);
+            if (ui.status === "running") {
+              const cmdPreview = ui.input?.command || ui.input?.path || ui.input?.query || ui.tool;
+              updateThinkingCard(activeAssistantBox, `正在执行: ${ui.tool}`, cmdPreview);
+            } else if (ui.status === "completed") {
+              updateThinkingCard(activeAssistantBox, "MiMo 正在整理结果", `工具 ${ui.tool} 执行完毕`);
+            }
 
           } else if (ui.kind === "title") {
             // 会话标题更新
             const titleEl = document.getElementById("top-session-title");
             if (titleEl && ui.title) titleEl.textContent = ui.title;
           }
-          // ui.kind === "usage" 可用于实时更新上下文 HUD（暂不处理）
+
+        // ── permission 权限事件（自动准许提示）────────────────
+        } else if (type === "permission" || type === "permission.asked") {
+          const permName = ev.req?.permission || "工具";
+          updateThinkingCard(activeAssistantBox, `已准许执行: ${permName}`, "已自动通过完全访问权限验证");
 
         // ── busy 心跳（忽略，不做任何处理）─────────────────────
         } else if (type === "busy") {
@@ -4386,6 +4649,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
         // ── idle：AI 完成 ─────────────────────────────────────
         } else if (type === "idle" || type === "session.idle") {
+          removeThinkingCard(activeAssistantBox);
           if (activeAssistantBox && !activeAssistantBox.dataset.feedbackDone) {
             appendFeedbackRow(activeAssistantBox);
             activeAssistantBox.dataset.feedbackDone = "1";
@@ -4401,6 +4665,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       activeSseSource.onmessage = handleEvt;
       activeSseSource.addEventListener("text-partial", handleEvt);
       activeSseSource.addEventListener("ui", handleEvt);
+      activeSseSource.addEventListener("permission", handleEvt);
+      activeSseSource.addEventListener("permission.asked", handleEvt);
       activeSseSource.addEventListener("busy", handleEvt);
       activeSseSource.addEventListener("idle", handleEvt);
       activeSseSource.addEventListener("closed", handleEvt);
@@ -4863,7 +5129,14 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                     self.send_json(400, {"error": "缺少 message 或 session_id"})
                     return
 
-                # 查询此 session 的真实工作目录 directory 与更新标题
+                perm = payload.get("perm") or get_current_perm()
+                perm_rules = None
+                if perm == "完全访问权限":
+                    perm_rules = json.dumps([{"permission": "*", "pattern": "*", "action": "allow"}])
+                elif perm == "帮我审批":
+                    perm_rules = json.dumps([{"permission": "edit", "pattern": "*", "action": "allow"}])
+
+                # 查询此 session 的真实工作目录 directory、更新标题并预配置权限规则
                 directory = "/Users/zhouzheng"
                 if os.path.exists(MIMO_DB_PATH):
                     try:
@@ -4876,13 +5149,14 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                                 directory = row[0]
                             if not row[1] or row[1] in ("新任务会话", "新建任务会话", "未命名任务"):
                                 new_title = msg.replace("\n", " ")[:32].strip()
-                                c.execute("UPDATE session SET title = ? WHERE id = ?", (new_title, sid))
-                                conn.commit()
+                                c.execute("UPDATE session SET title = ?, permission = ? WHERE id = ?", (new_title, perm_rules, sid))
+                            else:
+                                c.execute("UPDATE session SET permission = ? WHERE id = ?", (perm_rules, sid))
+                            conn.commit()
                         conn.close()
                     except Exception:
                         pass
 
-                perm = payload.get("perm") or get_current_perm()
                 files = payload.get("files", [])
                 req_body = {
                     "message": msg,
