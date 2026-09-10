@@ -3836,7 +3836,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     function isSameModel(idA, idB) {
       if (!idA || !idB) return idA === idB;
       if (idA === idB) return true;
-      const clean = id => id.replace(/^mimo\//, "").replace(/-preview$/, "").replace(/^mimo-x-/, "mimo-");
+      const clean = id => id.replace(new RegExp("^mimo/"), "").replace(new RegExp("-preview$"), "").replace(new RegExp("^mimo-x-"), "mimo-");
       return clean(idA) === clean(idB);
     }
 
