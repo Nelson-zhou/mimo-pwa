@@ -1770,12 +1770,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       background: rgba(220, 38, 38, 0.08);
     }
     .tool-console-box {
-      background: #0F172A;
-      color: #F8FAFC;
+      background: #F1F5F9;
+      border-top: 1px solid var(--border-subtle);
+      color: #334155;
       font-family: var(--font-mono);
       font-size: 11.5px;
+      line-height: 1.6;
       padding: 10px 12px;
-      max-height: 200px;
+      max-height: 220px;
       overflow-y: auto;
       white-space: pre-wrap;
       word-break: break-all;
