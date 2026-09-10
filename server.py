@@ -3903,7 +3903,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
     function stripSystemReminders(str) {
       if (!str) return "";
-      return str.replace(/<system-reminder>[\\s\\S]*?<\\/system-reminder>/gi, "").trim();
+      return str.replace(new RegExp("<system-reminder>[^]*?</system-reminder>", "gi"), "").trim();
     }
 
     function formatCodeBlocks(str) {
@@ -4190,52 +4190,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       wrap.appendChild(row);
     }
 
-    function startBusyPolling(sid) {
-      if (busyPollTimer) clearInterval(busyPollTimer);
-      busyPollTimer = setInterval(async () => {
-        if (!isBusy) {
-          clearInterval(busyPollTimer);
-          busyPollTimer = null;
-          return;
-        }
-        try {
-          const r = await fetch("/api/messages?session_id=" + sid);
-          const msgs = await r.json();
-          if (Array.isArray(msgs) && msgs.length > 0) {
-            const last = msgs[msgs.length - 1];
-            if (last.info?.role === "assistant") {
-              const parts = last.parts || [];
-              if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
-
-              parts.forEach(p => {
-                if (p.type === "reasoning" && p.text) {
-                  addThinking(activeAssistantBox, p.text);
-                } else if (p.type === "tool") {
-                  const out = p.state?.output || p.state?.metadata?.output || "";
-                  addToolCard(activeAssistantBox, p.callID, p.tool, p.state?.status, p.state?.input, out);
-                } else if (p.type === "text" && p.text) {
-                  activeProseCard = addProseText(activeAssistantBox, p.text);
-                }
-              });
-
-              const isCompleted = !!last.info?.time?.completed;
-              const hasRunningTool = parts.some(p => p.type === "tool" && p.state?.status === "running");
-              if (isCompleted || (!hasRunningTool && parts.some(p => p.type === "text" && p.text))) {
-                setBusy(false);
-                appendFeedbackRow(activeAssistantBox);
-                if (busyPollTimer) {
-                  clearInterval(busyPollTimer);
-                  busyPollTimer = null;
-                }
-                await loadSessionsList();
-              }
-            }
-          }
-        } catch (e) {}
-      }, 1000);
-    }
-
-    let busyPollTimer = null;
     function startBusyWatch(sid) {
       stopBusyWatch();
       let count = 0;
