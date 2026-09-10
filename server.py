@@ -4547,7 +4547,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         if (!r.ok) {
           stopBusyWatch();
           removeThinkingCard(activeAssistantBox);
-          activeProseCard = addProseText(activeAssistantBox, "❌ 调度出错: " + (res.error || "未知错误"));
+          const errMsg = res.error || res.message || res.code || `引擎响应异常 (HTTP ${r.status})`;
+          activeProseCard = addProseText(activeAssistantBox, "❌ 调度出错: " + errMsg);
           setBusy(false);
         }
       } catch (e) {
@@ -5174,6 +5175,17 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                     method="POST",
                     body=req_body,
                 )
+                if not isinstance(res, dict):
+                    res = {"error": str(res)}
+                elif "error" not in res and code >= 400:
+                    if res.get("code") == "busy" or res.get("message") == "session busy":
+                        res["error"] = "该任务会话正在执行中，请稍候片刻或点击左上角新建任务"
+                    elif res.get("message"):
+                        res["error"] = res["message"]
+                    elif res.get("code"):
+                        res["error"] = res["code"]
+                    else:
+                        res["error"] = f"MiMo 引擎返回状态码 HTTP {code}"
                 self.send_json(code, res)
                 return
 
