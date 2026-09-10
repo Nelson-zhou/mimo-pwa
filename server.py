@@ -64,14 +64,18 @@ def load_desktop_api_credentials() -> Tuple[Optional[int], Optional[str]]:
 
 
 def get_current_model() -> str:
-    """真实读取当前在 preferences.json 中保存的模型配置"""
+    """真实读取当前在 preferences.json 中保存的模型配置并规范为官方模型 ID"""
     if os.path.exists(PREFERENCES_PATH):
         try:
             with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
                 p = json.load(f)
                 m = p.get("model", "mimo/mimo-auto")
                 if "/" in m:
-                    return m.split("/", 1)[1]
+                    m = m.split("/", 1)[1]
+                if m in ("mimo-pro", "mimo-x-pro-preview"):
+                    return "mimo-x-pro-preview"
+                elif m in ("mimo-flash", "mimo-x-flash-preview"):
+                    return "mimo-x-flash-preview"
                 return m
         except Exception:
             pass
@@ -961,8 +965,23 @@ def generate_mimo_orange_icon(size: int = 192) -> bytes:
     return png
 
 
-ICON_192_PNG = generate_mimo_orange_icon(192)
-ICON_512_PNG = generate_mimo_orange_icon(512)
+OFFICIAL_MIMO_ICONS_DIR = os.path.join(os.path.dirname(__file__), "mimo-pwa", "assets")
+
+def load_official_icon(filename: str, fallback_size: int) -> bytes:
+    p = os.path.join(OFFICIAL_MIMO_ICONS_DIR, filename)
+    if os.path.exists(p):
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+                if len(data) > 100:
+                    return data
+        except Exception:
+            pass
+    return generate_mimo_orange_icon(fallback_size)
+
+ICON_192_PNG = load_official_icon("icon-192.png", 192)
+ICON_512_PNG = load_official_icon("icon-512.png", 512)
+APPLE_TOUCH_ICON_PNG = load_official_icon("apple_touch_icon.png", 180)
 
 # 读取裁剪好的真实客户端用户头像
 if os.path.exists(AVATAR_PNG_PATH):
@@ -972,12 +991,9 @@ else:
     USER_AVATAR_PNG = ICON_192_PNG
 
 ICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
-  <rect width="192" height="192" rx="42" fill="#FF6900"/>
-  <g fill="#FFFFFF">
-    <rect x="52" y="64" width="16" height="64" rx="4"/>
-    <rect x="124" y="64" width="16" height="64" rx="4"/>
-    <path d="M80 64h32c8.8 0 16 7.2 16 16v48h-16V84c0-2.2-1.8-4-4-4H80v48H64V64h16z"/>
-  </g>
+  <rect width="192" height="192" rx="42" fill="#111827"/>
+  <circle cx="96" cy="96" r="48" fill="#3B82F6"/>
+  <path d="M80 80l32 32M112 80l-32 32" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
 </svg>"""
 
 PWA_MANIFEST_JSON = json.dumps(
@@ -997,28 +1013,28 @@ PWA_MANIFEST_JSON = json.dumps(
         "categories": ["developer", "productivity", "utilities"],
         "icons": [
             {
-                "src": "/icons/icon-192.svg",
-                "sizes": "192x192",
-                "type": "image/svg+xml",
-                "purpose": "any maskable"
-            },
-            {
-                "src": "/icons/icon-512.svg",
-                "sizes": "512x512",
-                "type": "image/svg+xml",
-                "purpose": "any maskable"
-            },
-            {
                 "src": "/icons/icon-192.png",
                 "sizes": "192x192",
                 "type": "image/png",
-                "purpose": "any maskable"
+                "purpose": "any"
             },
             {
                 "src": "/icons/icon-512.png",
                 "sizes": "512x512",
                 "type": "image/png",
-                "purpose": "any maskable"
+                "purpose": "any"
+            },
+            {
+                "src": "/icons/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "maskable"
+            },
+            {
+                "src": "/icons/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "maskable"
             }
         ]
     },
@@ -1027,7 +1043,7 @@ PWA_MANIFEST_JSON = json.dumps(
 )
 
 PWA_SERVICE_WORKER_JS = """
-const CACHE_NAME = 'mimo-pwa-v9';
+const CACHE_NAME = 'mimo-pwa-v12';
 const PRECACHE = [
   '/',
   '/index.html',
@@ -1889,7 +1905,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 86px;
+      max-width: 135px;
       line-height: 1.2;
     }
 
@@ -2793,13 +2809,12 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
               </div>
               <div class="ctx-hud-tokens" id="ctx-hud-tokens">已用 0 · 共 200,000</div>
               <div class="ctx-hud-cache" id="ctx-hud-cache" style="display:none;">⚡ 缓存命中率 0%</div>
-              <div class="ctx-hud-model" id="ctx-hud-model">模型：mimo-x-pro</div>
+              <div class="ctx-hud-model" id="ctx-hud-model">模型：MiMo Auto</div>
             </div>
           </div>
 
           <div class="dock-model-wrap" id="dock-model-wrap">
             <div class="dock-model-selector" onclick="toggleModelMenu(event)" id="dock-model-btn" title="当前模型: MiMo Auto (官方默认)">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m13 2-2 2.5h3L11 9l7-3-4 6h3l-5 8 2-6h-3l2-6-5 3 2-6z"/></svg>
               <span id="model-name-label">MiMo Auto</span>
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
             </div>
@@ -3146,7 +3161,15 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             cacheEl.style.display = "none";
           }
         }
-        if (modelEl) modelEl.textContent = `模型：${model}`;
+        const modelDisplayMap = {
+          "mimo-auto": "MiMo Auto",
+          "mimo-pro": "MiMo-X-Pro-Preview",
+          "mimo-x-pro-preview": "MiMo-X-Pro-Preview",
+          "mimo-flash": "MiMo-X-Flash-Preview",
+          "mimo-x-flash-preview": "MiMo-X-Flash-Preview",
+        };
+        const displayModel = modelDisplayMap[model] || model;
+        if (modelEl) modelEl.textContent = `模型：${displayModel}`;
       } catch (e) {
         console.warn("Update context usage failed:", e);
       }
@@ -3810,12 +3833,19 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       }
     }
 
+    function isSameModel(idA, idB) {
+      if (!idA || !idB) return idA === idB;
+      if (idA === idB) return true;
+      const clean = id => id.replace(/^mimo\//, "").replace(/-preview$/, "").replace(/^mimo-x-/, "mimo-");
+      return clean(idA) === clean(idB);
+    }
+
     function renderModelList(models, curId) {
       const popoverList = document.getElementById("model-popover-list");
       const sheetList = document.getElementById("model-sheet-list");
 
       models.forEach(m => {
-        const isSel = (m.id === curId);
+        const isSel = isSameModel(m.id, curId);
         if (isSel) {
           selectedModelName = m.name;
           const lbl = document.getElementById("model-name-label");
@@ -3829,7 +3859,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (popoverList) {
         popoverList.innerHTML = "";
         models.forEach(m => {
-          const isSel = (m.id === curId);
+          const isSel = isSameModel(m.id, curId);
           const item = document.createElement("div");
           item.className = "model-popover-item " + (isSel ? "selected" : "");
           item.onclick = () => selectRealModel(m.id, m.name);
@@ -3850,7 +3880,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (sheetList) {
         sheetList.innerHTML = "";
         models.forEach(m => {
-          const isSel = (m.id === curId);
+          const isSel = isSameModel(m.id, curId);
           const item = document.createElement("div");
           item.className = "model-item " + (isSel ? "selected" : "");
           item.onclick = () => selectRealModel(m.id, m.name);
@@ -4501,17 +4531,17 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # 4. 图标 (多尺寸 SVG / PNG PWA & Apple-Touch-Icon 兼容)
-        elif path in ("/icons/icon-192.svg", "/icons/icon-512.svg"):
+        # 4. 图标 (官方 MiMo 原版多彩应用图标 & Apple-Touch-Icon 兼容)
+        elif path in ("/icons/apple-touch-icon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
             self.send_response(200)
-            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
-            self.send_header("Content-Length", str(len(ICON_SVG)))
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(APPLE_TOUCH_ICON_PNG)))
             self.send_header("Cache-Control", "public, max-age=86400")
             self.end_headers()
-            self.wfile.write(ICON_SVG)
+            self.wfile.write(APPLE_TOUCH_ICON_PNG)
             return
 
-        elif path in ("/icons/icon-192.png", "/icons/apple-touch-icon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png", "/favicon.ico"):
+        elif path in ("/icons/icon-192.png", "/favicon.ico"):
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(ICON_192_PNG)))
@@ -4520,7 +4550,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             self.wfile.write(ICON_192_PNG)
             return
 
-        elif path == "/icons/icon-512.png":
+        elif path in ("/icons/icon-512.png", "/icons/icon-192.svg", "/icons/icon-512.svg"):
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(ICON_512_PNG)))
@@ -4553,19 +4583,19 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                     "id": "mimo-auto",
                     "name": "MiMo Auto",
                     "badge": "官方默认",
-                    "desc": "官方智能调度 · 依据任务难易度自动在 Flash 与 Pro 间动态路由",
+                    "desc": "官方智能调度 · 依据任务难易度自动在 Flash 与 Pro 间无缝路由",
                 },
                 {
-                    "id": "mimo-pro",
-                    "name": "MiMo Pro",
-                    "badge": "自研旗舰",
-                    "desc": "自研旗舰架构 (MiMo-X-Pro) · 深度编程、复杂架构与工具调度",
+                    "id": "mimo-x-pro-preview",
+                    "name": "MiMo-X-Pro-Preview",
+                    "badge": "自研旗舰 · 1.0x",
+                    "desc": "自研旗舰架构 · 深度代码重构、复杂工程架构与全能工具调用",
                 },
                 {
-                    "id": "mimo-flash",
-                    "name": "MiMo Flash",
-                    "badge": "轻量极速",
-                    "desc": "轻量极速架构 (MiMo-X-Flash) · 毫秒级低延迟交互响应",
+                    "id": "mimo-x-flash-preview",
+                    "name": "MiMo-X-Flash-Preview",
+                    "badge": "轻量极速 · 0.4x",
+                    "desc": "轻量极速架构 · 毫秒级极速响应，适合敏捷会话与轻量编码",
                 },
             ]
             self.send_json(200, {"current": cur, "models": models_info})
@@ -4811,9 +4841,9 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
         # 2. 发送任务消息 (携带真实 model 参数 & 完全访问权限自动批准 & 工作目录)
         elif path == "/api/chat":
             msg = payload.get("message", "").strip()
-            sid = payload.get("session_id")
             model = payload.get("model") or get_current_model()
-            if model not in ("mimo-auto", "mimo-pro", "mimo-flash"):
+            valid_models = ("mimo-auto", "mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview")
+            if model not in valid_models:
                 model = "mimo-auto"
 
             if not msg or not sid:
@@ -4861,7 +4891,8 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
         # 3. 真实模型切换与 preferences.json 同步持久化
         elif path == "/api/model":
             target = payload.get("model", "mimo-auto").strip()
-            if target in ("mimo-auto", "mimo-pro", "mimo-flash"):
+            valid_models = ("mimo-auto", "mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview")
+            if target in valid_models:
                 ok = set_current_model(target)
                 self.send_json(200, {"ok": ok, "current": target})
             else:
