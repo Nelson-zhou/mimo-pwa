@@ -841,6 +841,12 @@ def create_new_mimo_session_in_db(title: str = "新任务会话", directory: str
             with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
             data["currentKey"] = new_id
+            if "convoMeta" not in data or not isinstance(data["convoMeta"], dict):
+                data["convoMeta"] = {}
+            data["convoMeta"][new_id] = {
+                "project": os.path.basename(directory) or "zhouzheng",
+                "directory": directory,
+            }
             with open(COMPOSER_INPUT_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f)
         except Exception:
@@ -3962,8 +3968,16 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
 
     async function selectSession(sid, title) {
+      if (currentSessionId === sid) {
+        toggleDrawer(false);
+        return;
+      }
       currentSessionId = sid;
       document.getElementById("top-session-title").textContent = title || "当前任务";
+      activeAssistantBox = null;
+      activeToolsMap = {};
+      stopBusyWatch();
+      setBusy(false);
       toggleDrawer(false);
       await loadHistoricalMessages(sid, true);
       connectSessionSSE(sid);
@@ -3990,6 +4004,10 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
               </div>
             </div>
           `;
+          activeAssistantBox = null;
+          activeToolsMap = {};
+          stopBusyWatch();
+          setBusy(false);
           connectSessionSSE(res.id);
           await loadSessionsList();
           toggleDrawer(false);
@@ -4217,6 +4235,48 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       }, 1000);
     }
 
+    let busyPollTimer = null;
+    function startBusyWatch(sid) {
+      stopBusyWatch();
+      let count = 0;
+      busyPollTimer = setInterval(async () => {
+        if (!isBusy) {
+          stopBusyWatch();
+          return;
+        }
+        count++;
+        try {
+          const r = await fetch("/api/messages?session_id=" + sid);
+          const msgs = await r.json();
+          if (Array.isArray(msgs) && msgs.length > 0) {
+            const last = msgs[msgs.length - 1];
+            if (last.role === "assistant") {
+              const parts = last.parts || [];
+              const hasFinish = parts.some(p => p.type === "step-finish" || p.finish || p.reason === "stop");
+              if (hasFinish) {
+                stopBusyWatch();
+                setBusy(false);
+                loadHistoricalMessages(sid, false);
+                loadSessionsList();
+                updateContextUsage(sid);
+              }
+            }
+          }
+        } catch(e) {}
+        if (count > 180) { // 超过 4.5 分钟超时兜底
+          stopBusyWatch();
+          setBusy(false);
+        }
+      }, 1500);
+    }
+
+    function stopBusyWatch() {
+      if (busyPollTimer) {
+        clearInterval(busyPollTimer);
+        busyPollTimer = null;
+      }
+    }
+
     async function sendPrompt() {
       const input = document.getElementById("dock-input");
       const text = input.value.trim();
@@ -4247,6 +4307,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         connectSessionSSE(currentSessionId);
       }
 
+      // 启动智能兜底轮询保障（1.5s），即使网络丢包或 SSE 挂起也能实时捕捉回复
+      startBusyWatch(currentSessionId);
+
       try {
         const r = await fetch("/api/chat", {
           method: "POST",
@@ -4261,10 +4324,12 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         });
         const res = await r.json();
         if (!r.ok) {
+          stopBusyWatch();
           activeProseCard.innerHTML = "❌ 调度出错: " + (res.error || "未知错误");
           setBusy(false);
         }
       } catch (e) {
+        stopBusyWatch();
         activeProseCard.innerHTML = "❌ 请求失败: " + e.message;
         setBusy(false);
       }
@@ -4272,6 +4337,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
     function setBusy(busy) {
       isBusy = busy;
+      if (!busy) stopBusyWatch();
       const btn = document.getElementById("btn-dock-send");
       if (busy) {
         btn.classList.add("abort");
@@ -4285,6 +4351,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
 
     async function abortTask() {
+      stopBusyWatch();
       try {
         await fetch("/api/abort", {
           method: "POST",
@@ -4726,12 +4793,27 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "缺少 session_id 参数"})
                 return
 
+            # 查询此 session 的真实工作目录 directory
+            directory = "/Users/zhouzheng"
+            if os.path.exists(MIMO_DB_PATH):
+                try:
+                    conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+                    c = conn.cursor()
+                    c.execute("SELECT directory FROM session WHERE id = ?", (sid,))
+                    row = c.fetchone()
+                    if row and row[0]:
+                        directory = row[0]
+                    conn.close()
+                except Exception:
+                    pass
+
             port, token = load_desktop_api_credentials()
             if not port or not token:
                 self.send_json(503, {"error": "MiMo 引擎未运行"})
                 return
 
-            url = f"http://127.0.0.1:{port}/v1/sessions/{sid}/events"
+            dir_param = urllib.parse.quote(directory)
+            url = f"http://127.0.0.1:{port}/v1/sessions/{sid}/events?dir={dir_param}"
             req = urllib.request.Request(
                 url,
                 headers={"Authorization": f"Bearer {token}", "User-Agent": "Xiaomi-MiMo-PWA-Client"},
@@ -4743,6 +4825,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache, no-transform")
                 self.send_header("Connection", "keep-alive")
                 self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("X-Accel-Buffering", "no")
                 self.end_headers()
 
                 for raw_line in upstream:
@@ -4783,17 +4866,21 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 self.send_json(400, {"error": "缺少 message 或 session_id"})
                 return
 
-            # 如果该会话标题是默认名，自动用第一句提示词命名
+            # 查询此 session 的真实工作目录 directory 与更新标题
+            directory = "/Users/zhouzheng"
             if os.path.exists(MIMO_DB_PATH):
                 try:
                     conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
                     c = conn.cursor()
-                    c.execute("SELECT title FROM session WHERE id = ?", (sid,))
+                    c.execute("SELECT directory, title FROM session WHERE id = ?", (sid,))
                     row = c.fetchone()
-                    if row and (not row[0] or row[0] in ("新任务会话", "新建任务会话", "未命名任务")):
-                        new_title = msg.replace("\n", " ")[:32].strip()
-                        c.execute("UPDATE session SET title = ? WHERE id = ?", (new_title, sid))
-                        conn.commit()
+                    if row:
+                        if row[0]:
+                            directory = row[0]
+                        if not row[1] or row[1] in ("新任务会话", "新建任务会话", "未命名任务"):
+                            new_title = msg.replace("\n", " ")[:32].strip()
+                            c.execute("UPDATE session SET title = ? WHERE id = ?", (new_title, sid))
+                            conn.commit()
                     conn.close()
                 except Exception:
                     pass
@@ -4804,7 +4891,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 "message": msg,
                 "model": model,
                 "perm": perm,
-                "dir": os.path.expanduser("~"),
+                "dir": directory,
             }
             if isinstance(files, list) and files:
                 req_body["files"] = [f for f in files if isinstance(f, str) and f]
