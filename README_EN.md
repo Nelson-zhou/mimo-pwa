@@ -1,142 +1,142 @@
-# Xiaomi MiMo PWA 📱✨
+# Xiaomi MiMo PWA 📱
 
-[![Python](https://img.shields.io/badge/python-3.9+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9+-3776AB.svg?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![PWA](https://img.shields.io/badge/PWA-Installable-5A0FC8.svg?logo=pwa&logoColor=white)](https://web.dev/progressive-web-apps/)
-[![Tailscale](https://img.shields.io/badge/Tailscale-HTTPS%20Ready-black.svg?logo=tailscale&logoColor=white)](https://tailscale.com/)
-[![Zero Dependencies](https://img.shields.io/badge/Dependencies-0%20(Pure%20Python)-success.svg)](#)
+[![Dependencies](https://img.shields.io/badge/Dependencies-0%20(Pure%20Python)-success.svg)](#)
+[![PWA Ready](https://img.shields.io/badge/PWA-Standalone%20App-5A0FC8.svg?logo=pwa&logoColor=white)](https://web.dev/progressive-web-apps/)
+[![Tailscale](https://img.shields.io/badge/Network-Tailscale%20%2F%20LAN-black.svg?logo=tailscale&logoColor=white)](https://tailscale.com/)
 
-> **Official Pixel-Perfect Mobile PWA Gateway for Xiaomi MiMo Desktop** — Seamlessly monitor and control your Xiaomi MiMo AI agent on your desktop from any mobile device (iOS / Android / tablets) anytime, anywhere. Features genuine address-bar-free standalone PWA installation, desktop focus synchronization, 1M official context HUD, and desktop avatar & weekly quota linkage.
+> **Lightweight Mobile PWA Gateway for Xiaomi MiMo Desktop**.  
+> Solves the mobile accessibility limitation of the official desktop AI agent. Control your MiMo tasks remotely from your phone (iOS / Android) with zero external dependencies in pure Python.
 
 [中文文档 (Chinese Documentation)](./README.md)
 
 ---
 
-## 🌟 Key Features
+## 🛠️ Problems Solved
 
-### 🎨 1. 1:1 Official MiMo Aesthetics & Brand Mark
-- **Authentic MiMo Geometric Mark**: Extracted from desktop client source Figma assets (`Figma 1929:695 / 2046:263`), showcasing deep black canvas (`#000000`) and cream-white (`#FFF9EE`) 4-quadrant geometric symbols (`M` `I` `M` `O`).
-- **Complete Retina Icon Matrix**: Includes `apple-touch-icon.png` (180×180 full-bleed squircle clipping for iOS), `icon-192.png`, `icon-512.png`, and vector SVGs with strict cache-busting headers to guarantee instant visual updates.
-- **Minimalist Light Interface**: 1:1 reproduction of desktop styling (`#FFFFFF` / `#F8F9FA`), floating dock input bar, syntax-highlighted code blocks, and collapsible reasoning accordions.
+Xiaomi MiMo only provides a desktop client (macOS). Once developers leave their workstation, they cannot check task progress or dispatch urgent tasks.
 
-### 🤖 2. Official Model Matrix with Real-Time Persistence
-Full bidirectional synchronization with desktop `preferences.json`, supporting all official MiMo models:
-| Model Name | Positioning | Compute Multiplier | Recommended Use Case |
-| :--- | :--- | :---: | :--- |
-| **MiMo Auto** | Recommended default scheduler | 1.0x | General coding, intent analysis, everyday tasks |
-| **MiMo-X-Pro-Preview** | Flagship reasoning & coding | 1.0x | Complex system architectures, large refactors, full-stack debug |
-| **MiMo-X-Flash-Preview**| Ultra-low latency | 0.4x | Quick Q&A, lightweight scripts, conversational flow |
-
-### 📊 3. 1M Context Window & Dynamic SVG HUD
-- **1,000,000 (1M) Native Token Capacity**: Decoded from client's internal asar configuration (`limit: { context: 1e6 }`). Proprietary MiMo models leverage full 1M context limits, while 3rd party models adapt to 200k.
-- **Dynamic Circular Progress HUD**: Header HUD displays current token count, percentage, remaining capacity, and prompt cache hit rate in real time.
-
-### 👤 4. Desktop Avatar & 7-Day Usage + Weekly Quota
-- **Direct LevelDB Avatar Linkage**: Automatically extracts and circular-crops user avatar from Electron LevelDB (`mimo.set.avatar`) alongside Xiaomi SSO profile credentials.
-- **Interactive 7-Day Histogram**: Tap the avatar to open an interactive modal displaying daily token consumption for the past week, today's usage, and week total.
-- **Subscription Quota Indicator**: Displays remaining weekly subscription quota percentage and reset schedule (e.g. *Remaining 68.5% · Resets Monday 00:00*), identical to desktop app.
-
-### ⚡ 5. Dual-Channel High Reliability (SSE + Polling Guard)
-- **Millisecond Typewriter Streaming**: Direct pass-through of `/v1/sessions/{id}/events` SSE stream with structured tool invocation cards (Bash, Edit, Grep, Read).
-- **Mobile Sleep & Background Protection**: Built-in 1.5s intelligent polling fallback ensures zero lost messages when switching apps or locking the screen.
-- **Workspace Directory & Auto Title**: Inherits desktop working directory (`~`) for new tasks, and automatically extracts conversation titles from the opening prompt.
-
-### 🛠️ 6. Multimodal Input & System Permissions
-- **Speech-to-Text Voice Input**: Integrated Web Speech API for instantaneous, hands-free voice dictation.
-- **Multimodal File & Image Uploads**: Drag and drop or upload images and documents with live thumbnails injected into the prompt.
-- **System-Level Permission Bypass**: Quick toggles for "Full Access", "Ask for Approval", or "Default", allowing autonomous remote script execution without returning to your desktop.
-- **Plugins & Artifacts**: Inspect installed MCP skills and preview generated artifacts and code directly on your phone.
-
-### 🚀 7. Zero External Dependencies (Pure Python)
-- **100% Python 3 Standard Library** (`http.server`, `sqlite3`, `urllib`, `struct`, `zlib`, etc.).
-- **Zero `pip install` required**, zero node_modules, instant deployment.
+By reverse-engineering the desktop application's internal runtime mechanics, this gateway provides an uninvasive local bridge that enables:
+1. **Full Mobile Control**: Assign tasks, inspect code changes, and review live agent outputs from any smartphone.
+2. **Autonomous Execution Without Pop-ups**: Automatically authorizes execution permissions, allowing CLI tools and terminal scripts to run autonomously without requiring desktop confirmation.
+3. **Bidirectional State Sync**: Automatically inherits active session focus, working directory, and conversation history directly from your Mac.
+4. **Standalone App Experience**: Installs as an address-bar-free native PWA with speech-to-text dictation and image attachment uploads.
 
 ---
 
-## 🏗️ Architecture
+## 🏗️ Technical Architecture: 6 Local Integration Touchpoints
+
+The gateway does not patch binaries. Instead, it hooks into 6 key local runtime artifacts maintained by the desktop app:
 
 ```
 ┌────────────────────────────────────────────────────────┐
 │             Mobile PWA (iOS Safari / Android Chrome)   │
-│    (Tailscale HTTPS: https://<device>.ts.net:8443)     │
+│    (Tailscale HTTPS / Local Wi-Fi Network)             │
 └───────────────────────────┬────────────────────────────┘
                             │  SSE Stream / REST API
                             ▼
 ┌────────────────────────────────────────────────────────┐
-│             mimo-pwa Local Gateway (server.py)         │
-│          (Listening on 0.0.0.0:8080, Pure Python)      │
+│             mimo-pwa Gateway (server.py)               │
+│         (Listening 0.0.0.0:8080, Pure Python Standard) │
 └───────────┬───────────────────────────────┬────────────┘
             │                               │
-            ▼ Local REST Bridge             ▼ Local Storage & Persistence
+            ▼ Local API Calls               ▼ Direct File & DB Read/Write
 ┌───────────────────────────┐   ┌────────────────────────────────┐
-│  Xiaomi MiMo Desktop Core │   │     Local Config & Databases   │
+│  Xiaomi MiMo Desktop Core │   │     Local Runtime Storage      │
 │  (Internal dynamic port)  │   │                                │
-│ • POST /v1/sessions/turns │   │ • mimocode.db (SQLite session) │
-│ • GET  /v1/sessions/events│   │ • composer-input.json (focus)  │
-│ • POST /v1/sessions/abort │   │ • preferences.json (models)    │
-│ • GET  /v1/tools          │   │ • Cookies.db (SSO quota query) │
-│                           │   │ • LevelDB (desktop app avatar) │
+│                           │   │ 1. desktop-api.json (Port/Auth)│
+│ • POST /v1/sessions/turns │   │ 2. mimocode.db (SQLite)        │
+│ • GET  /v1/sessions/events│   │ 3. composer-input.json (Focus) │
+│ • POST /v1/sessions/abort │   │ 4. preferences.json (Models)   │
+│ • GET  /v1/tools          │   │ 5. Electron LevelDB (Settings) │
+│                           │   │ 6. Cookies.db (SSO Quota API)  │
 └───────────────────────────┘   └────────────────────────────────┘
 ```
+
+| Integration Touchpoint | Local Path / Protocol | Mechanism & Practical Utility |
+| :--- | :--- | :--- |
+| **1. Dynamic Credentials** | `~/Library/Application Support/Xiaomi MiMo/desktop-api.json` | The desktop core starts on an ephemeral port. The gateway extracts the dynamic `port` and Bearer `token` automatically. |
+| **2. Session & History DB**| `~/.local/share/mimocode/mimocode.db` (SQLite) | Direct SQLite integration: auto-inherits the workspace directory (`~`) and titles sessions based on first prompt. |
+| **3. Active Focus Linkage**| `~/Library/Application Support/Xiaomi MiMo/composer-input.json` | Reads user's active session on desktop (`activeSessionId`), automatically opening the current desktop task on mobile. |
+| **4. Model Persistence**   | `~/Library/Application Support/Xiaomi MiMo/preferences.json` | Directly updates persistent configuration when toggling models from mobile. |
+| **5. Desktop Avatar Sync** | `~/Library/Application Support/Xiaomi MiMo/Local Storage/leveldb` | Decodes `mimo.set.avatar` from LevelDB to render custom user avatars in the mobile drawer. |
+| **6. Weekly Quota Tracking**| `~/Library/Application Support/Xiaomi MiMo/Partitions/xiaomi-account/Cookies` | Reads Xiaomi SSO `passToken` to query remaining weekly quota percentage and reset schedules. |
+
+---
+
+## ⚡ Core Engineering Capabilities
+
+### 1. 1,000,000 Token Native Context & Live Token HUD
+- **1M Context Limit**: Decoded from client's internal configuration (`limit: { context: 1e6 }`). Full 1M token support for proprietary MiMo models.
+- **Dynamic Circular Progress HUD**: Header HUD displays token count, remaining percentage, and Prompt Cache Hit Rate in real time.
+
+### 2. Full Official Model Matrix
+| Model ID | Backend Identifier | Compute Multiplier | Recommended Use Case |
+| :--- | :--- | :---: | :--- |
+| **MiMo Auto** | `mimo-auto` | 1.0x | Default intelligent routing according to task complexity |
+| **MiMo-X-Pro-Preview** | `mimo-x-pro-preview` | 1.0x | Flagship reasoning for system architecture and large-scale refactors |
+| **MiMo-X-Flash-Preview**| `mimo-x-flash-preview` | 0.4x | Lightweight, low-latency interactions and quick edits |
+
+### 3. Dual-Channel High Availability (SSE + Polling Watchdog)
+- **Millisecond Typewriter Streaming**: Direct pass-through of `/v1/sessions/{id}/events` SSE stream with structured tool invocation cards (Bash, Edit, Grep, Read).
+- **Mobile Sleep & Lock Protection**: Integrated 1.5s polling fallback prevents hung connections or dropped messages when switching apps.
+
+### 4. Autonomous Execution Authorization
+- Tasks sent from mobile default to `perm: "完全访问权限"`, allowing CLI execution without requiring desktop confirmation.
+
+### 5. Zero Dependencies (Pure Python)
+- Single-file architecture implemented exclusively with Python standard libraries (`http.server`, `sqlite3`, `urllib`, `struct`, `zlib`, etc.).
+- No `pip install`, no node build steps, instant deployment.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Prerequisites
-- **OS**: macOS running [Xiaomi MiMo Desktop](https://mimo.xiaomi.com/).
-- **Python**: Python 3.9+.
+### 1. Run the Gateway
+Ensure **Xiaomi MiMo** is running on your Mac, then start the gateway:
 
-### 2. Run the Gateway
 ```bash
-# Clone repository
 git clone https://github.com/Nelson-zhou/mimo-pwa.git
 cd mimo-pwa
 
-# One-click start (default port: 8080)
-./start.sh
-
-# Or start directly with Python
-python3 server.py --port 8080
+# Start gateway (listening on 0.0.0.0:8080)
+python3 server.py
 ```
 
----
+### 2. Network Access
 
-## 📱 Mobile Installation & PWA Experience
+#### Option A: Tailscale Serve (Recommended for Remote Access)
+Exposes an official HTTPS certificate required for standalone PWA installation:
 
-To eliminate browser address bars and get a native full-screen app experience, use **Tailscale HTTPS**:
+```bash
+# Enable HTTPS forwarding on port 8443
+tailscale serve --https=8443 --bg 8080
+```
+Open the generated HTTPS URL (e.g. `https://<device>.ts.net:8443`) in your phone's browser.
 
-### Recommended: Tailscale Automatic HTTPS
+#### Option B: Local Wi-Fi
+Connect phone and computer to the same Wi-Fi, and open `http://<LAN_IP>:8080`.
 
-1. **Enable Tailscale Port Serving on your Mac**:
-   ```bash
-   tailscale serve --https=8443 --bg 8080
-   ```
-2. **Launch the Gateway**: The terminal will print your private HTTPS address:
-   ```text
-   👉 [True Native PWA Installation Channel (HTTPS Valid Certificate)]:
-      https://macbook-pro.tail9f7768.ts.net:8443
-   ```
-3. **Install on Phone**:
-   - **iOS (Safari)**: Open the link ➔ Tap **Share** ➔ Tap **Add to Home Screen**.
-   - **Android (Chrome)**: Open the link ➔ Tap **Add to Home screen** / **Install App**.
-4. **Result**: A pristine standalone **Xiaomi MiMo** application icon appears on your home screen with no browser chrome.
+### 3. Add to Home Screen
+- **iOS (Safari)**: Tap Share ➔ Tap **Add to Home Screen**.
+- **Android (Chrome)**: Tap menu ➔ Tap **Install App** / **Add to Home Screen**.
 
 ---
 
 ## ⚙️ Command Line Options
 
-```bash
-python3 server.py --help
+```text
+Usage: python3 server.py [options]
 
 Options:
-  --port PORT        Gateway listening port (default: 8080)
-  --host HOST        Listening interface (default: 0.0.0.0)
-  --workdir DIR      Default working directory for new sessions (default: ~)
+  --port PORT       Gateway listen port (default: 8080)
+  --host HOST       Interface IP to bind (default: 0.0.0.0)
+  --workdir DIR     Default workspace directory for new sessions (default: ~)
 ```
 
 ---
 
 ## 📄 License
 
-Distributed under the [MIT License](./LICENSE). Built to empower developers and AI agent enthusiasts with desktop-grade workflows on mobile.
+Distributed under the [MIT License](./LICENSE).
