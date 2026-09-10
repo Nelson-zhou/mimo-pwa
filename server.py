@@ -265,15 +265,33 @@ def format_token_lx(val: int) -> str:
     return str(val)
 
 
+def get_model_context_limit(model_id: str) -> int:
+    """从 app.asar 反编译代码中读取的真实 context window 大小（单位：tokens）
+    asar 中: limit:{context:1e6,output:128e3} (MiMo Auto)
+             limit:{context:1e6,output:32768}  (MiMo X Flash/Pro)
+    mimo-auto / mimo-flash / mimo-pro / mimo-x-* 等自有模型实际是 1,000,000 (1M)
+    """
+    mid = (model_id or "").lower()
+    if "claude" in mid:
+        return 200_000          # Claude 系列 200K
+    if "deepseek" in mid:
+        return 128_000          # DeepSeek 系列 128K
+    if "gemini" in mid:
+        return 1_000_000        # Gemini 1.5+ 系列 1M
+    # MiMo 自有模型：mimo-auto / mimo-flash / mimo-pro / mimo-x-flash / mimo-x-pro
+    return 1_000_000            # 默认 1M（MiMo 平台托管）
+
+
 def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
     """1:1 深度对齐 Xiaomi MiMo 客户端 A0e / TD / b0e 算法读取真实 Token 消耗"""
+    _default_limit = get_model_context_limit("mimo-auto")  # 1M
     if not os.path.exists(MIMO_DB_PATH):
         return {
             "ok": True,
             "total": 0,
             "total_fmt": "0",
-            "limit": 200000,
-            "limit_fmt": "200K",
+            "limit": _default_limit,
+            "limit_fmt": format_token_lx(_default_limit),
             "pct": 0,
             "remaining_pct": 100,
             "cache_hit": 0,
@@ -336,8 +354,8 @@ def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
                 "ok": True,
                 "total": 0,
                 "total_fmt": "0",
-                "limit": 200000,
-                "limit_fmt": "200K",
+                "limit": _default_limit,
+                "limit_fmt": format_token_lx(_default_limit),
                 "pct": 0,
                 "remaining_pct": 100,
                 "cache_hit": 0,
@@ -351,13 +369,7 @@ def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
         cache_write = found_tokens["cache_write"]
         model_id = (found_data or {}).get("modelID", "mimo-auto")
 
-        limit = 200000
-        if "claude" in model_id.lower():
-            limit = 200000
-        elif "deepseek" in model_id.lower():
-            limit = 128000
-        elif "flash" in model_id.lower() or "pro" in model_id.lower() or "mimo" in model_id.lower():
-            limit = 200000
+        limit = get_model_context_limit(model_id)
 
         # 官方 jD / x0e 百分比算法
         pct = round((total / limit) * 100, 1) if limit > 0 else 0
@@ -388,8 +400,8 @@ def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
             "error": str(e),
             "total": 0,
             "total_fmt": "0",
-            "limit": 200000,
-            "limit_fmt": "200K",
+            "limit": get_model_context_limit("mimo-auto"),
+            "limit_fmt": format_token_lx(get_model_context_limit("mimo-auto")),
             "pct": 0,
             "remaining_pct": 100,
             "cache_hit": 0,
