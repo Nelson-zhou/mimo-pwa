@@ -5,6 +5,14 @@ __pycache__/
 *.so
 .Python
 
+# Logs
+*.log
+
+# User uploads & Temporary data
+uploads/
+tmp/
+temp/
+
 # Certificates & Secrets
 *.crt
 *.key
@@ -26,7 +34,7 @@ env/
 .env
 .venv/
 
-# IDE
+# IDE & Editors
 .idea/
 .vscode/
 *.swp
