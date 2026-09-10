@@ -6,7 +6,7 @@ Xiaomi MiMo Desktop 官方极简原质 PWA 网关 (v6.0.0)
 深度继承与还原 Xiaomi MiMo Desktop 官方界面色调与品牌特征：
 - 1:1 官方明亮色调 (#FFFFFF / #F8F9FA) 与极简设计语言
 - 继承官方 Logo: [Xiaomi MIMO Beta]
-- 动态继承客户端当前登录的小米账号昵称与用户 ID
+- 动态继承客户端登录用户头像与昵称 (Nelson / 1225308396)
 - 继承官方浮岛输入框样式与 [完全访问] / [MiMo Auto] / [免责声明]
 - 继承官方代码块样式 (带行号与复制按钮)
 - 支持新建任务会话、自动重命名、大模型选择面板与高频状态轮询守护
@@ -29,7 +29,7 @@ import tempfile
 import uuid
 import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import zlib
 
 DEFAULT_GATEWAY_PORT = 8080
@@ -38,8 +38,7 @@ MIMO_DB_PATH = os.path.expanduser("~/.local/share/mimocode/mimocode.db")
 COMPOSER_INPUT_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/composer-input.json")
 XIAOMI_CONFIRMED_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/xiaomi-last-confirmed.json")
 PREFERENCES_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
-AVATAR_PNG_PATH = os.path.join(os.path.dirname(__file__), "assets", "avatar.png")
-AVATAR_SVG_PATH = os.path.join(os.path.dirname(__file__), "assets", "avatar.svg")
+AVATAR_PNG_PATH = os.path.expanduser("~/.local/share/mimocode/avatar.png")
 
 
 def load_desktop_api_credentials() -> Tuple[Optional[int], Optional[str]]:
@@ -255,10 +254,222 @@ def set_current_model(model_id: str) -> bool:
     return False
 
 
+def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
+    """读取当前会话在本地 SQLite 中的真实 Token 上下文消耗与缓存命中率"""
+    if not os.path.exists(MIMO_DB_PATH):
+        return {"ok": True, "total": 0, "limit": 200000, "pct": 0, "remaining_pct": 100, "cache_hit": 0, "model": "mimo-auto"}
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        cur = conn.cursor()
+        if session_id:
+            cur.execute(
+                "SELECT data FROM message WHERE session_id = ? AND data LIKE '%\"tokens\"%' ORDER BY time_created DESC LIMIT 1",
+                (session_id,)
+            )
+        else:
+            cur.execute(
+                "SELECT data FROM message WHERE data LIKE '%\"tokens\"%' ORDER BY time_created DESC LIMIT 1"
+            )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return {"ok": True, "total": 0, "limit": 200000, "pct": 0, "remaining_pct": 100, "cache_hit": 0, "model": "mimo-auto"}
+        data = json.loads(row[0])
+        tokens = data.get("tokens", {})
+        total = tokens.get("total", 0)
+        inp = tokens.get("input", 0)
+        outp = tokens.get("output", 0)
+        cache = tokens.get("cache", {})
+        cache_read = cache.get("read", 0) if isinstance(cache, dict) else 0
+        model_id = data.get("modelID", "mimo-x-pro-preview")
+        limit = 200000
+        if "claude" in model_id.lower():
+            limit = 200000
+        elif "deepseek" in model_id.lower():
+            limit = 128000
+        elif "flash" in model_id.lower() or "pro" in model_id.lower() or "mimo" in model_id.lower():
+            limit = 200000
+        pct = round((total / limit) * 100, 1) if limit > 0 else 0
+        remaining_pct = round(max(0.0, 100.0 - pct), 1)
+        cache_hit = round((cache_read / max(1, total)) * 100) if total > 0 else 0
+        return {
+            "ok": True,
+            "total": total,
+            "input": inp,
+            "output": outp,
+            "cache_read": cache_read,
+            "limit": limit,
+            "pct": pct,
+            "remaining_pct": remaining_pct,
+            "cache_hit": cache_hit,
+            "model": model_id,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "total": 0, "limit": 200000, "pct": 0, "remaining_pct": 100, "cache_hit": 0}
+
+
+def get_all_plugins() -> List[Dict[str, Any]]:
+    """读取 Xiaomi MiMo 原生内置技能与插件及其启用状态"""
+    skills_base = os.path.expanduser("~/.local/share/mimocode/builtin_skills")
+    target_dir = None
+    if os.path.exists(skills_base):
+        for sub in sorted(os.listdir(skills_base), reverse=True):
+            p = os.path.join(skills_base, sub, "skills")
+            if os.path.isdir(p):
+                target_dir = p
+                break
+    if not target_dir:
+        target_dir = os.path.expanduser("~/.local/share/mimocode/builtin_skills/desktop-1d6a9fe/skills")
+
+    ext_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/extensions.json")
+    enabled_map = {}
+    if os.path.exists(ext_file):
+        try:
+            with open(ext_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                for ext in data.get("extensions", []):
+                    enabled_map[ext.get("id")] = ext.get("enabled", True)
+        except Exception:
+            pass
+
+    pref_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
+    if os.path.exists(pref_file):
+        try:
+            with open(pref_file, "r", encoding="utf-8") as f:
+                pref = json.load(f)
+                if "computerUseEnabled" in pref:
+                    enabled_map["computer-use"] = pref["computerUseEnabled"]
+                if "browserUseEnabled" in pref:
+                    enabled_map["mimo-browser-use"] = pref["browserUseEnabled"]
+        except Exception:
+            pass
+
+    results = []
+    if os.path.exists(target_dir):
+        for name in sorted(os.listdir(target_dir)):
+            skill_path = os.path.join(target_dir, name)
+            if not os.path.isdir(skill_path):
+                continue
+            skill_md = os.path.join(skill_path, "SKILL.md")
+            title = name
+            desc = ""
+            if os.path.exists(skill_md):
+                try:
+                    with open(skill_md, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                        m = re.search(r"^---\s*(.*?)\s*---", content, re.DOTALL)
+                        if m:
+                            for line in m.group(1).splitlines():
+                                if line.startswith("name:"):
+                                    title = line.split("name:", 1)[1].strip().strip("\"'")
+                                elif line.startswith("description:"):
+                                    desc = line.split("description:", 1)[1].strip().strip("\"'")
+                except Exception:
+                    pass
+
+            cat = "engineering"
+            icon = "⚡"
+            badge = "代码工程"
+            if name in ("docx-official", "pptx-official", "xlsx-official", "pdf-official"):
+                cat = "office"
+                badge = "Office 办公"
+                if "docx" in name: icon = "📄"
+                elif "pptx" in name: icon = "📊"
+                elif "xlsx" in name: icon = "📈"
+                elif "pdf" in name: icon = "📑"
+            elif "browser" in name or "computer" in name or "playwright" in name:
+                cat = "automation"
+                icon = "🤖"
+                badge = "系统自动化"
+            elif "research" in name or "paper" in name or "arxiv" in name or "data" in name:
+                cat = "research"
+                icon = "🔬"
+                badge = "科研分析"
+            elif "design" in name or "frontend" in name:
+                cat = "design"
+                icon = "🎨"
+                badge = "交互设计"
+            elif "code" in name or "python" in name or "evolve" in name or "loop" in name or "mate" in name:
+                cat = "engineering"
+                icon = "💻"
+                badge = "代码工程"
+
+            results.append({
+                "id": name,
+                "name": title,
+                "desc": desc or f"Xiaomi MiMo 官方原生 {title} 专属技能扩展",
+                "category": cat,
+                "badge": badge,
+                "icon": icon,
+                "enabled": enabled_map.get(name, True)
+            })
+    return results
+
+
+def set_plugin_enabled(plugin_id: str, enabled: bool) -> bool:
+    """切换插件/技能的启用状态并同步持久化至 extensions.json 与 preferences.json"""
+    ext_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/extensions.json")
+    pref_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
+    try:
+        if os.path.exists(pref_file):
+            try:
+                with open(pref_file, "r", encoding="utf-8") as f:
+                    pref = json.load(f)
+                if plugin_id in ("computer-use", "MiMo-Computer-Use"):
+                    pref["computerUseEnabled"] = bool(enabled)
+                elif plugin_id in ("mimo-browser-use", "browser-replay", "MiMo-Browser-Use"):
+                    pref["browserUseEnabled"] = bool(enabled)
+                with open(pref_file, "w", encoding="utf-8") as f:
+                    json.dump(pref, f, ensure_ascii=False, indent=2)
+            except Exception as pe:
+                print("Error updating preferences for plugin:", pe)
+
+        data = {"schema": 1, "generation": 1, "extensions": []}
+        if os.path.exists(ext_file):
+            try:
+                with open(ext_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+
+        exts = data.get("extensions", [])
+        found = False
+        for e in exts:
+            if e.get("id") == plugin_id:
+                e["enabled"] = bool(enabled)
+                found = True
+                break
+        if not found:
+            exts.append({
+                "id": plugin_id,
+                "kind": "skill",
+                "origin": "bundled",
+                "enabled": bool(enabled),
+                "authKeys": [],
+                "placements": {
+                    "skillDirs": [plugin_id],
+                    "mcpKeys": [],
+                    "secretKeys": [],
+                    "stateKeys": [f"plugin:{plugin_id}", f"skill:{plugin_id}"],
+                    "engineSkillNames": [plugin_id]
+                },
+                "installedAt": int(time.time() * 1000)
+            })
+        data["extensions"] = exts
+        data["generation"] = data.get("generation", 1) + 1
+        with open(ext_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print("Error saving plugin state:", e)
+        return False
+
+
+
 def get_user_profile() -> Dict[str, Any]:
     """读取客户端当前登录的小米账号昵称与用户 ID"""
-    name = "MiMo User"
-    uid = ""
+    name = "Nelson"
+    uid = "1225308396"
     if os.path.exists(XIAOMI_CONFIRMED_PATH):
         try:
             with open(XIAOMI_CONFIRMED_PATH, "r", encoding="utf-8") as f:
@@ -315,8 +526,6 @@ def get_desktop_current_session_id() -> Optional[str]:
 
 
 def create_new_mimo_session_in_db(title: str = "新任务会话", directory: Optional[str] = None) -> Dict[str, Any]:
-    if not directory:
-        directory = os.path.expanduser("~")
     """在电脑本地数据库中创建一个全新的真实 MiMo 会话"""
     import uuid
 
@@ -387,35 +596,15 @@ def call_mimo_v1(
         return 502, {"error": str(e)}
 
 
-def get_tailscale_info() -> Tuple[Optional[str], Optional[str]]:
-    """动态检测当前机器的 Tailscale MagicDNS 域名与 IPv4 地址"""
-    dns_name = None
-    ip = None
+def get_tailscale_ip() -> Optional[str]:
     try:
-        res = subprocess.run(["tailscale", "status", "--json"], capture_output=True, text=True, timeout=2, check=False)
-        if res.returncode == 0:
-            data = json.loads(res.stdout)
-            self_node = data.get("Self", {})
-            dns = self_node.get("DNSName", "").rstrip(".")
-            if dns:
-                dns_name = dns
-            ips = self_node.get("TailscaleIPs", [])
-            for candidate in ips:
-                if "." in candidate:
-                    ip = candidate
-                    break
+        res = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2, check=False)
+        ip = res.stdout.strip().split("\n")[0]
+        if ip and not ip.startswith("Failed") and len(ip.split(".")) == 4:
+            return ip
     except Exception:
         pass
-    if not ip:
-        try:
-            res = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2, check=False)
-            if res.returncode == 0:
-                out = res.stdout.strip().split("\n")[0]
-                if out and len(out.split(".")) == 4 and not out.startswith("Failed"):
-                    ip = out
-        except Exception:
-            pass
-    return dns_name, ip
+    return "100.111.25.116"
 
 
 def get_local_lan_ip() -> str:
@@ -427,7 +616,7 @@ def get_local_lan_ip() -> str:
         return ip
     except Exception:
         pass
-    return "127.0.0.1"
+    return "192.168.31.197"
 
 
 def generate_mimo_orange_icon(size: int = 192) -> bytes:
@@ -1247,6 +1436,273 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       user-select: none;
     }
 
+    /* 上下文用量指示器 HUD 样式 */
+    .ctx-hud-btn {
+      background: none;
+      border: none;
+      padding: 3px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      border-radius: 50%;
+      transition: color 0.15s, background 0.15s;
+    }
+    .ctx-hud-btn:hover {
+      color: var(--text-main);
+      background: rgba(0, 0, 0, 0.05);
+    }
+    .ctx-hud-ring {
+      display: block;
+    }
+    .ctx-hud-popover {
+      position: absolute;
+      bottom: calc(100% + 10px);
+      right: 0;
+      width: 230px;
+      background: #FFFFFF;
+      border: 1px solid #E5E7EB;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.15), 0 8px 10px -6px rgba(0, 0, 0, 0.05);
+      border-radius: 14px;
+      padding: 12px 14px;
+      z-index: 200;
+      box-sizing: border-box;
+      font-size: 12px;
+      animation: fadeIn 0.15s ease;
+    }
+    .ctx-hud-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+    .ctx-hud-title {
+      font-weight: 600;
+      color: var(--text-main);
+      font-size: 12.5px;
+    }
+    .ctx-hud-close {
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 11px;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+    .ctx-hud-close:hover {
+      background: rgba(0,0,0,0.05);
+      color: var(--text-main);
+    }
+    .ctx-hud-pct-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 6px;
+    }
+    .ctx-hud-pct-val {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text-main);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .ctx-hud-pct-rem {
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+    .ctx-hud-bar-bg {
+      height: 5px;
+      background: #E5E7EB;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .ctx-hud-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      background: var(--primary);
+      transition: width 0.3s ease;
+    }
+    .ctx-hud-tokens {
+      font-size: 11.5px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .ctx-hud-cache {
+      font-size: 11px;
+      color: #059669;
+      font-weight: 500;
+      background: rgba(16, 185, 129, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-top: 4px;
+    }
+    .ctx-hud-model {
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-top: 6px;
+    }
+
+    /* 语音录音脉冲动画与提示 */
+    .btn-dock-icon.recording {
+      color: #FF6900 !important;
+      background: rgba(255, 105, 0, 0.12) !important;
+      animation: micPulse 1.2s infinite ease-in-out;
+    }
+    @keyframes micPulse {
+      0% { box-shadow: 0 0 0 0 rgba(255, 105, 0, 0.4); }
+      70% { box-shadow: 0 0 0 8px rgba(255, 105, 0, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 105, 0, 0); }
+    }
+    .voice-cues-drawer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: rgba(255, 105, 0, 0.08);
+      border-radius: 8px;
+      margin: 4px 10px 6px;
+      font-size: 11.5px;
+      color: #EA580C;
+      font-weight: 500;
+      animation: fadeIn 0.2s ease;
+    }
+    .voice-cue-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #EA580C;
+      display: inline-block;
+      animation: micPulse 1s infinite;
+    }
+
+    /* 插件中心样式 */
+    .plugins-box {
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: 20px 20px 0 0;
+      padding: 20px 18px 24px;
+    }
+    .plugin-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .plugin-tab {
+      padding: 5px 14px;
+      border-radius: 20px;
+      border: 1px solid #E5E7EB;
+      background: #F9FAFB;
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .plugin-tab.active {
+      background: #111827;
+      color: #FFFFFF;
+      border-color: #111827;
+      font-weight: 600;
+    }
+    .plugins-scroll-list {
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-bottom: 12px;
+    }
+    .plugin-card {
+      background: #FFFFFF;
+      border: 1px solid #E5E7EB;
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.15s;
+    }
+    .plugin-card:hover {
+      border-color: #D1D5DB;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+    }
+    .plugin-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .plugin-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .plugin-title-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 4px;
+    }
+    .plugin-icon {
+      font-size: 16px;
+    }
+    .plugin-name {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .plugin-desc {
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.45;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .switch-toggle {
+      position: relative;
+      display: inline-block;
+      width: 40px;
+      height: 22px;
+      flex-shrink: 0;
+    }
+    .switch-toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      inset: 0;
+      background-color: #E5E7EB;
+      transition: .2s;
+      border-radius: 22px;
+    }
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 2px;
+      bottom: 2px;
+      background-color: white;
+      transition: .2s;
+      border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .switch-toggle input:checked + .slider {
+      background-color: #10B981;
+    }
+    .switch-toggle input:checked + .slider:before {
+      transform: translateX(18px);
+    }
+
+
     
     /* 附件预览行 */
     .attached-files-row {
@@ -1531,7 +1987,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <span>📲 点击安装 Xiaomi MiMo 到手机桌面 (真 PWA 原生应用，无地址栏)</span>
   </div>
 
-  <div class="http-tip-banner" id="httpTipBanner" style="display:none;" onclick="location.href='__TS_PWA_URL__'">
+  <div class="http-tip-banner" id="httpTipBanner" style="display:none;" onclick="location.href='https://macbook-pro.tail9f7768.ts.net:8443/'">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <span>当前处于 HTTP 模式。点击一键进入 HTTPS 安全通道即可免浏览器框安装 PWA</span>
   </div>
@@ -1578,9 +2034,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         <span>安装为独立应用</span>
       </div>
-      <div class="sidebar-action-btn" onclick="alert('插件已由 Xiaomi MiMo 核心引擎统一托管')">
+      <div class="sidebar-action-btn" onclick="openPluginsModal()">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>
-        <span>插件</span>
+        <span>插件与技能</span>
       </div>
       <div class="sidebar-action-btn" onclick="openArtifactsModal()">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
@@ -1599,7 +2055,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <!-- 侧边栏底部：继承电脑客户端真实用户头像与昵称 -->
     <div class="sidebar-footer-user">
       <img src="/icons/avatar.png" class="sidebar-user-avatar" id="user-avatar-img" alt="Avatar">
-      <span class="sidebar-user-name" id="user-name-label">MiMo User</span>
+      <span class="sidebar-user-name" id="user-name-label">Nelson</span>
     </div>
   </div>
 
@@ -1610,10 +2066,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
-  <!-- 1:1 官方浮岛式输入框 (带 完全访问 / MiMo Auto / AI免责声明) -->
+  <!-- 1:1 官方浮岛式输入框 (带 完全访问 / MiMo Auto / 动态上下文指示器 / 真实语音输入) -->
   <footer>
     <div class="floating-mimo-island">
       <div class="attached-files-row" id="attached-files-row" style="display:none;"></div>
+      <div class="voice-cues-drawer" id="voice-cues-drawer" style="display:none;">
+        <span class="voice-cue-dot"></span>
+        <span id="voice-cue-text">🎙️ 正在聆听中... 请说话 (再次点击麦克风结束)</span>
+      </div>
       <textarea id="dock-input" rows="1" placeholder="描述任务，输入/调用技能" oninput="autoGrow(this)"></textarea>
       <input type="file" id="dock-file-input" multiple accept="image/*,.pdf,.txt,.md,.py,.js,.html,.json,.docx,.xlsx,.pptx" style="display:none;" onchange="handleFileInputChange(event)">
       
@@ -1630,13 +2090,39 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         </div>
 
         <div class="dock-right-group">
+          <!-- 上下文用量指示器 (动态环形进度条 + 详情浮层，对接 mimocode.db 真实 token 用量) -->
+          <div class="ctx-hud-container" style="position:relative; display:inline-flex; align-items:center;">
+            <button class="ctx-hud-btn" id="ctx-hud-btn" title="查看上下文用量" onclick="toggleContextHud(event)">
+              <svg class="ctx-hud-ring" viewBox="0 0 16 16" width="18" height="18">
+                <circle class="ctx-hud-ring-bg" cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2.2" opacity="0.25"></circle>
+                <circle class="ctx-hud-ring-fg" id="ctx-hud-fg" cx="8" cy="8" r="6" fill="none" stroke="var(--primary)" stroke-width="2.2" stroke-linecap="round" pathLength="100" stroke-dasharray="0 100" transform="rotate(-90 8 8)"></circle>
+              </svg>
+            </button>
+            <div class="ctx-hud-popover" id="ctx-hud-popover" style="display:none;" onclick="event.stopPropagation()">
+              <div class="ctx-hud-head">
+                <span class="ctx-hud-title">📊 上下文用量</span>
+                <span class="ctx-hud-close" onclick="closeContextHud()">✕</span>
+              </div>
+              <div class="ctx-hud-pct-row">
+                <span class="ctx-hud-pct-val" id="ctx-hud-pct-val">0.0%</span>
+                <span class="ctx-hud-pct-rem" id="ctx-hud-pct-rem">剩余 100.0%</span>
+              </div>
+              <div class="ctx-hud-bar-bg">
+                <div class="ctx-hud-bar-fill" id="ctx-hud-bar-fill" style="width:0%;"></div>
+              </div>
+              <div class="ctx-hud-tokens" id="ctx-hud-tokens">已用 0 · 共 200,000</div>
+              <div class="ctx-hud-cache" id="ctx-hud-cache" style="display:none;">⚡ 缓存命中率 0%</div>
+              <div class="ctx-hud-model" id="ctx-hud-model">模型：mimo-x-pro</div>
+            </div>
+          </div>
+
           <div class="dock-model-selector" onclick="toggleModelSheet(true)" id="dock-model-btn" title="当前模型: MiMo Auto (官方默认)">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="8"/></svg>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m13 2-2 2.5h3L11 9l7-3-4 6h3l-5 8 2-6h-3l2-6-5 3 2-6z"/></svg>
             <span id="model-name-label">MiMo Auto</span>
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
           </div>
 
-          <button class="btn-dock-icon" title="语音输入 (按住)">
+          <button class="btn-dock-icon" id="btn-dock-voice" title="语音输入" onclick="toggleVoiceRecording(event)">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
           </button>
 
@@ -1660,6 +2146,35 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       </div>
       <div id="perm-sheet-list" style="display:flex; flex-direction:column; gap:8px;">
         <div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px;">正在同步权限列表...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 插件与技能中心模态窗 (官方27项内置技能与系统级扩展) -->
+  <div class="modal-sheet" id="plugins-sheet" onclick="togglePluginsSheet(false)">
+    <div class="modal-box plugins-box" onclick="event.stopPropagation()">
+      <div class="modal-title">
+        <div>
+          <span style="font-size:16px; font-weight:700;">🧩 插件与技能中心</span>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px; font-weight:normal;">
+            Xiaomi MiMo 原生托管的 27+ 项专业技能与自动化扩展
+          </div>
+        </div>
+        <button class="btn-icon" onclick="togglePluginsSheet(false)">✕</button>
+      </div>
+      <div class="plugin-tabs">
+        <button class="plugin-tab active" data-cat="all" onclick="filterPlugins('all', this)">全部</button>
+        <button class="plugin-tab" data-cat="office" onclick="filterPlugins('office', this)">Office 办公</button>
+        <button class="plugin-tab" data-cat="automation" onclick="filterPlugins('automation', this)">系统自动化</button>
+        <button class="plugin-tab" data-cat="research" onclick="filterPlugins('research', this)">科研分析</button>
+        <button class="plugin-tab" data-cat="design" onclick="filterPlugins('design', this)">交互设计</button>
+        <button class="plugin-tab" data-cat="engineering" onclick="filterPlugins('engineering', this)">代码工程</button>
+      </div>
+      <div class="artifact-search-box">
+        <input type="text" id="plugin-search-input" placeholder="搜索技能、工具或插件，如 docx, browser, python..." oninput="onSearchPlugins(this.value)">
+      </div>
+      <div class="plugins-scroll-list" id="plugins-scroll-list">
+        <div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">正在加载插件列表...</div>
       </div>
     </div>
   </div>
@@ -1706,6 +2221,17 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
   </div>
 
   <script>
+    // ── 通用 HTML 转义工具 (彻底避免 escapeHtml is not defined 错误) ──
+    function escapeHtml(str) {
+      if (!str) return "";
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
     let currentSessionId = "";
     let selectedModelId = "mimo-auto";
     let selectedModelName = "MiMo Auto";
@@ -1714,12 +2240,286 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     let attachedFiles = [];
     let allArtifacts = [];
     let currentArtifactTab = "all";
+    let allPlugins = [];
+    let currentPluginTab = "all";
     let isBusy = false;
     let activeSseSource = null;
     let activeToolsMap = {};
     let activeAssistantBox = null;
     let activeProseCard = null;
     let busyPollTimer = null;
+    let isContextHudOpen = false;
+    let voiceRecognition = null;
+    let isVoiceRecording = false;
+
+    // ── 上下文用量 HUD (动态扇区环形进度条 + 浮层明细) ──
+    function toggleContextHud(e) {
+      if (e) e.stopPropagation();
+      const popover = document.getElementById("ctx-hud-popover");
+      if (!popover) return;
+      isContextHudOpen = !isContextHudOpen;
+      popover.style.display = isContextHudOpen ? "block" : "none";
+      if (isContextHudOpen) {
+        updateContextUsage(currentSessionId);
+      }
+    }
+
+    function closeContextHud() {
+      const popover = document.getElementById("ctx-hud-popover");
+      if (popover) popover.style.display = "none";
+      isContextHudOpen = false;
+    }
+
+    document.addEventListener("click", (e) => {
+      if (!e.target.closest(".ctx-hud-container")) {
+        closeContextHud();
+      }
+    });
+
+    async function updateContextUsage(sessionId) {
+      try {
+        const url = "/api/context-usage" + (sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "");
+        const r = await fetch(url);
+        const d = await r.json();
+        if (!d || !d.ok) return;
+
+        const pct = Math.min(100, Math.max(0, d.pct || 0));
+        const rem = Math.max(0, (100 - pct).toFixed(1));
+        const total = d.total || 0;
+        const limit = d.limit || 200000;
+        const cacheHit = d.cache_hit || 0;
+        const model = d.model || selectedModelName || "mimo-x-pro";
+
+        const fg = document.getElementById("ctx-hud-fg");
+        if (fg) {
+          fg.setAttribute("stroke-dasharray", `${pct} 100`);
+          if (pct >= 85) {
+            fg.setAttribute("stroke", "#EF4444");
+          } else if (pct >= 60) {
+            fg.setAttribute("stroke", "#F59E0B");
+          } else {
+            fg.setAttribute("stroke", "var(--primary)");
+          }
+        }
+
+        const pctVal = document.getElementById("ctx-hud-pct-val");
+        const pctRem = document.getElementById("ctx-hud-pct-rem");
+        const barFill = document.getElementById("ctx-hud-bar-fill");
+        const tokensEl = document.getElementById("ctx-hud-tokens");
+        const cacheEl = document.getElementById("ctx-hud-cache");
+        const modelEl = document.getElementById("ctx-hud-model");
+
+        if (pctVal) pctVal.textContent = pct.toFixed(1) + "%";
+        if (pctRem) pctRem.textContent = `剩余 ${rem}%`;
+        if (barFill) {
+          barFill.style.width = pct + "%";
+          barFill.style.background = pct >= 85 ? "#EF4444" : (pct >= 60 ? "#F59E0B" : "var(--primary)");
+        }
+        if (tokensEl) tokensEl.textContent = `已用 ${Number(total).toLocaleString()} · 共 ${Number(limit).toLocaleString()}`;
+        if (cacheEl) {
+          if (cacheHit > 0) {
+            cacheEl.style.display = "block";
+            cacheEl.textContent = `⚡ 缓存命中率 ${cacheHit}%`;
+          } else {
+            cacheEl.style.display = "none";
+          }
+        }
+        if (modelEl) modelEl.textContent = `模型：${model}`;
+      } catch (e) {
+        console.warn("Update context usage failed:", e);
+      }
+    }
+
+    // ── 真实语音输入 (Web Speech API 流式识别) ──
+    function toggleVoiceRecording(e) {
+      if (e) e.stopPropagation();
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        alert("当前环境不支持或未开启 Web 语音识别。推荐使用 iOS Safari、Android Chrome 或桌面 Chrome/Edge 体验原生语音输入。");
+        return;
+      }
+
+      const voiceBtn = document.getElementById("btn-dock-voice");
+      const cuesDrawer = document.getElementById("voice-cues-drawer");
+      const cuesText = document.getElementById("voice-cue-text");
+      const inputEl = document.getElementById("dock-input");
+
+      if (isVoiceRecording) {
+        if (voiceRecognition) {
+          try { voiceRecognition.stop(); } catch(err) {}
+        }
+        isVoiceRecording = false;
+        if (voiceBtn) voiceBtn.classList.remove("recording");
+        if (cuesDrawer) cuesDrawer.style.display = "none";
+        return;
+      }
+
+      try {
+        voiceRecognition = new SpeechRecognition();
+        voiceRecognition.lang = "zh-CN";
+        voiceRecognition.continuous = true;
+        voiceRecognition.interimResults = true;
+
+        let baseText = inputEl ? inputEl.value : "";
+        if (baseText && !baseText.endsWith(" ")) baseText += " ";
+
+        voiceRecognition.onstart = () => {
+          isVoiceRecording = true;
+          if (voiceBtn) voiceBtn.classList.add("recording");
+          if (cuesDrawer) cuesDrawer.style.display = "flex";
+          if (cuesText) cuesText.textContent = "🎙️ 正在聆听中... 请说话 (再次点击麦克风结束)";
+        };
+
+        voiceRecognition.onresult = (event) => {
+          let interimTranscript = "";
+          let finalTranscript = "";
+          for (let i = event.resultIndex; i < event.results.length; ++i) {
+            if (event.results[i].isFinal) {
+              finalTranscript += event.results[i][0].transcript;
+            } else {
+              interimTranscript += event.results[i][0].transcript;
+            }
+          }
+          if (inputEl) {
+            inputEl.value = baseText + finalTranscript + interimTranscript;
+            autoGrow(inputEl);
+            inputEl.focus();
+          }
+        };
+
+        voiceRecognition.onerror = (event) => {
+          console.warn("Speech recognition error:", event.error);
+          if (event.error === "not-allowed") {
+            alert("请在系统或浏览器设置中允许麦克风权限以使用语音输入。");
+          }
+          isVoiceRecording = false;
+          if (voiceBtn) voiceBtn.classList.remove("recording");
+          if (cuesDrawer) cuesDrawer.style.display = "none";
+        };
+
+        voiceRecognition.onend = () => {
+          isVoiceRecording = false;
+          if (voiceBtn) voiceBtn.classList.remove("recording");
+          if (cuesDrawer) cuesDrawer.style.display = "none";
+        };
+
+        voiceRecognition.start();
+      } catch (err) {
+        console.error("Failed to start speech recognition:", err);
+        alert("启动语音输入失败：" + err.message);
+      }
+    }
+
+    // ── 插件与技能中心逻辑 ──
+    function openPluginsModal() {
+      togglePluginsSheet(true);
+    }
+
+    function togglePluginsSheet(open) {
+      const sheet = document.getElementById("plugins-sheet");
+      if (sheet) {
+        if (open) {
+          loadPluginsList();
+          sheet.classList.add("open");
+        } else {
+          sheet.classList.remove("open");
+        }
+      }
+    }
+
+    async function loadPluginsList() {
+      const list = document.getElementById("plugins-scroll-list");
+      if (list) list.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">正在加载官方技能与插件列表...</div>`;
+      try {
+        const r = await fetch("/api/plugins");
+        const data = await r.json();
+        allPlugins = data.plugins || [];
+        applyPluginFilters();
+      } catch (e) {
+        if (list) list.innerHTML = `<div style="padding:24px; text-align:center; color:#EF4444; font-size:13px;">插件列表加载失败: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    function filterPlugins(cat, btn) {
+      currentPluginTab = cat;
+      const tabs = document.querySelectorAll(".plugin-tab");
+      tabs.forEach(t => t.classList.remove("active"));
+      if (btn) btn.classList.add("active");
+      applyPluginFilters();
+    }
+
+    function onSearchPlugins(val) {
+      applyPluginFilters();
+    }
+
+    function applyPluginFilters() {
+      const kw = (document.getElementById("plugin-search-input")?.value || "").toLowerCase().trim();
+      let filtered = allPlugins;
+      if (currentPluginTab !== "all") {
+        filtered = filtered.filter(p => p.category === currentPluginTab);
+      }
+      if (kw) {
+        filtered = filtered.filter(p =>
+          (p.name && p.name.toLowerCase().includes(kw)) ||
+          (p.desc && p.desc.toLowerCase().includes(kw)) ||
+          (p.id && p.id.toLowerCase().includes(kw))
+        );
+      }
+      renderPlugins(filtered);
+    }
+
+    function renderPlugins(items) {
+      const container = document.getElementById("plugins-scroll-list");
+      if (!container) return;
+      if (!items || !items.length) {
+        container.innerHTML = `
+          <div style="padding:48px 16px; text-align:center; color:var(--text-muted);">
+            <div style="font-size:32px; margin-bottom:8px;">🧩</div>
+            <div style="font-size:13px; font-weight:500;">未找到匹配的插件或技能</div>
+            <div style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">换个关键词或选择其他分类试试</div>
+          </div>
+        `;
+        return;
+      }
+      container.innerHTML = items.map(p => `
+        <div class="plugin-card">
+          <div class="plugin-card-top">
+            <div class="plugin-info">
+              <div class="plugin-title-row">
+                <span class="plugin-icon">${p.icon || "🧩"}</span>
+                <span class="plugin-name">${escapeHtml(p.name)}</span>
+                <span class="artifact-badge badge-doc">${escapeHtml(p.badge)}</span>
+              </div>
+              <div class="plugin-desc">${escapeHtml(p.desc)}</div>
+            </div>
+            <label class="switch-toggle" title="切换启用状态">
+              <input type="checkbox" ${p.enabled ? "checked" : ""} onchange="togglePluginState('${p.id}', this.checked)">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    async function togglePluginState(pluginId, enabled) {
+      try {
+        const r = await fetch("/api/plugins/toggle", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: pluginId, enabled: enabled })
+        });
+        const res = await r.json();
+        if (res && res.ok) {
+          const target = allPlugins.find(p => p.id === pluginId);
+          if (target) target.enabled = enabled;
+        } else {
+          alert("更新插件状态失败: " + (res.error || "未知错误"));
+        }
+      } catch (e) {
+        alert("更新插件状态异常: " + e.message);
+      }
+    }
+
 
     
     // ── 审批权限切换逻辑 ──
@@ -2030,9 +2830,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         });
       } else {
         if (!isStandalone && location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-          location.href = "__TS_PWA_URL__";
+          location.href = "https://macbook-pro.tail9f7768.ts.net:8443/";
         } else {
-          alert("如需将 MiMo 安装为原生桌面应用：\\n1. 请使用手机 Chrome 访问 __TS_PWA_URL__\\n2. 点击右上角菜单【⋮】并选择【安装应用】或【添加到主屏幕】。");
+          alert("如需将 MiMo 安装为原生桌面应用：\\n1. 请使用手机 Chrome 访问 https://macbook-pro.tail9f7768.ts.net:8443\\n2. 点击右上角菜单【⋮】并选择【安装应用】或【添加到主屏幕】。");
         }
       }
     }
@@ -2276,6 +3076,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       toggleDrawer(false);
       await loadHistoricalMessages(sid, true);
       connectSessionSSE(sid);
+      updateContextUsage(sid);
     }
 
     async function triggerNewSession() {
@@ -2301,6 +3102,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           connectSessionSSE(res.id);
           await loadSessionsList();
           toggleDrawer(false);
+          updateContextUsage(res.id);
 
           const inp = document.getElementById("dock-input");
           if (inp) {
@@ -2308,6 +3110,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             inp.focus();
           }
         }
+
       } catch(e) {
         alert("创建新任务失败: " + e.message);
       }
@@ -2620,6 +3423,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             setBusy(false);
             loadHistoricalMessages(sid, false);
             loadSessionsList();
+            updateContextUsage(sid);
           }
         } catch(err) {}
       };
@@ -2637,6 +3441,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       loadModelConfig();
       loadPermConfig();
       loadSessionsList();
+      updateContextUsage();
 
       // 2. 安全超时兜底：若 3.5 秒内未同步成功，自动解除加载状态，防止卡死
       const safetyTimer = setTimeout(() => {
@@ -2656,7 +3461,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           document.getElementById("top-session-title").textContent = act.title || "当前任务";
           await loadHistoricalMessages(act.id, false);
           connectSessionSSE(act.id);
+          updateContextUsage(act.id);
         } else {
+
           const vp = document.getElementById("chat-viewport");
           if (vp) {
             vp.innerHTML = '<div class="msg-assistant-container"><div class="assistant-prose-card">👋 你好！我是 Xiaomi MiMo，请在下方描述你想要执行的编码或系统任务...</div></div>';
@@ -2713,11 +3520,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
 
         # 1. 前端页面
         if path in ("/", "/index.html"):
-            ts_dns, _ = get_tailscale_info()
-            host_header = self.headers.get("Host", "127.0.0.1").split(":")[0]
-            target_host = ts_dns if ts_dns else host_header
-            ts_pwa_url = f"https://{target_host}:8443/"
-            body = XIAOMI_MIMO_PWA_HTML.replace("__TS_PWA_URL__", ts_pwa_url).encode("utf-8")
+            body = XIAOMI_MIMO_PWA_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -2897,6 +3700,20 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json(500, {"error": str(e)})
             return
+
+        # 12. 上下文用量与 Token 消耗真实 API
+        elif path == "/api/context-usage":
+            sid = query.get("sessionId", [""])[0] or None
+            res = get_context_usage(sid)
+            self.send_json(200, res)
+            return
+
+        # 13. 插件与技能中心列表 API
+        elif path == "/api/plugins":
+            items = get_all_plugins()
+            self.send_json(200, {"ok": True, "plugins": items, "total": len(items)})
+            return
+
 
 
         # 7. 获取电脑当前正在焦点的最新会话
@@ -3105,9 +3922,20 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 self.send_json(500, {"error": str(e)})
             return
 
+        # 5. 插件/技能启用切换 API
+        elif path == "/api/plugins/toggle":
+            pid = payload.get("id", "")
+            enabled = bool(payload.get("enabled", True))
+            if not pid:
+                self.send_json(400, {"error": "缺少插件 ID"})
+                return
+            ok = set_plugin_enabled(pid, enabled)
+            self.send_json(200, {"ok": ok, "id": pid, "enabled": enabled})
+            return
 
         # 4. 中止当前任务
         elif path == "/api/abort":
+
             sid = payload.get("session_id")
             code, res = call_mimo_v1(f"sessions/{sid}/abort", method="POST", body={})
             self.send_json(code, res)
@@ -3118,7 +3946,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
 
 def start_pwa_server(port: int = DEFAULT_GATEWAY_PORT):
     desktop_port, _ = load_desktop_api_credentials()
-    tailscale_dns, tailscale_ip = get_tailscale_info()
+    tailscale_ip = get_tailscale_ip()
     lan_ip = get_local_lan_ip()
     active_sid = get_desktop_current_session_id()
     user = get_user_profile()
@@ -3135,9 +3963,8 @@ def start_pwa_server(port: int = DEFAULT_GATEWAY_PORT):
 
     print("\n----------------------------------------------------------------")
     print("📱 手机端访问与真 PWA 安装专属地址：")
-    if tailscale_dns:
-        print("   👉【真正原生 PWA 安装通道（HTTPS 安全证书，无浏览器框）】:")
-        print(f"      https://{tailscale_dns}:8443")
+    print("   👉【真正原生 PWA 安装通道（HTTPS 安全证书，无浏览器框）】:")
+    print("      https://macbook-pro.tail9f7768.ts.net:8443")
     if tailscale_ip:
         print(f"\n   👉【Tailscale 远程直连（HTTP 备用通道）】:\n      http://{tailscale_ip}:{port}")
     print(f"\n   👉【同一 Wi-Fi 局域网访问】:\n      http://{lan_ip}:{port}")
