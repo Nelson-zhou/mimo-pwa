@@ -38,7 +38,7 @@ MIMO_DB_PATH = os.path.expanduser("~/.local/share/mimocode/mimocode.db")
 COMPOSER_INPUT_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/composer-input.json")
 XIAOMI_CONFIRMED_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/xiaomi-last-confirmed.json")
 PREFERENCES_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
-AVATAR_PNG_PATH = os.path.expanduser("~/.local/share/mimocode/avatar.png")
+AVATAR_PNG_PATH = "/Users/zhouzheng/.gemini/antigravity/scratch/avatar_circle.png"
 
 
 def load_desktop_api_credentials() -> Tuple[Optional[int], Optional[str]]:
@@ -613,7 +613,7 @@ def get_desktop_current_session_id() -> Optional[str]:
     return None
 
 
-def create_new_mimo_session_in_db(title: str = "新任务会话", directory: Optional[str] = None) -> Dict[str, Any]:
+def create_new_mimo_session_in_db(title: str = "新任务会话", directory: str = "/Users/zhouzheng") -> Dict[str, Any]:
     """在电脑本地数据库中创建一个全新的真实 MiMo 会话"""
     import uuid
 
@@ -3755,9 +3755,12 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       setBusy(true);
 
       activeAssistantBox = appendAssistantBox();
-      activeProseCard = addProseText(activeAssistantBox, "正在调度执行...");
+      activeProseCard = addProseText(activeAssistantBox, "思考中...");
 
-      startBusyPolling(currentSessionId);
+      // 确保 SSE 已连接（发送消息前 SSE 就应已建立，这里是双保险）
+      if (!activeSseSource || activeSseSource.readyState === EventSource.CLOSED) {
+        connectSessionSSE(currentSessionId);
+      }
 
       try {
         const r = await fetch("/api/chat", {
@@ -3812,33 +3815,68 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (activeSseSource) activeSseSource.close();
       activeSseSource = new EventSource("/api/events?session_id=" + sid);
 
-      const handleEvt = function(e) {
-        try {
-          const ev = JSON.parse(e.data);
-          const type = ev.type || e.type;
+      // 追踪当前 SSE 连接的 sid，防止旧连接事件混入
+      activeSseSource._sid = sid;
 
-          if (type === "text-partial" && ev.text) {
-            if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
-            activeProseCard = addProseText(activeAssistantBox, ev.text);
-          } else if (type === "ui" && ev.ui) {
-            if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
-            if (ev.ui.kind === "text" && ev.ui.text) {
-              activeProseCard = addProseText(activeAssistantBox, ev.ui.text);
-            }
-          } else if (type === "idle" || type === "closed" || type === "session.idle") {
-            setBusy(false);
-            loadHistoricalMessages(sid, false);
-            loadSessionsList();
-            updateContextUsage(sid);
+      const handleEvt = function(e) {
+        if (activeSseSource._sid !== sid) return; // 连接已切换，忽略旧事件
+        let ev;
+        try { ev = JSON.parse(e.data); } catch(_) { return; }
+        const type = ev.type || e.type;
+
+        // ── 文本流（累积全文，每次覆盖）──────────────────────────
+        if (type === "text-partial" && typeof ev.text === "string") {
+          if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
+          activeProseCard = addProseText(activeAssistantBox, ev.text);
+
+        // ── ui 事件（tool / text / title / usage）───────────────
+        } else if (type === "ui" && ev.ui) {
+          const ui = ev.ui;
+          if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
+
+          if (ui.kind === "text" && typeof ui.text === "string") {
+            // 最终文本（与 text-partial 同源，已是全文）
+            activeProseCard = addProseText(activeAssistantBox, ui.text);
+
+          } else if (ui.kind === "tool") {
+            // 工具调用卡片实时更新
+            const out = ui.output || "";
+            addToolCard(activeAssistantBox, ui.callID, ui.tool, ui.status, ui.input, out);
+
+          } else if (ui.kind === "title") {
+            // 会话标题更新
+            const titleEl = document.getElementById("top-session-title");
+            if (titleEl && ui.title) titleEl.textContent = ui.title;
           }
-        } catch(err) {}
+          // ui.kind === "usage" 可用于实时更新上下文 HUD（暂不处理）
+
+        // ── busy 心跳（忽略，不做任何处理）─────────────────────
+        } else if (type === "busy") {
+          // no-op
+
+        // ── idle：AI 完成 ─────────────────────────────────────
+        } else if (type === "idle" || type === "session.idle") {
+          if (activeAssistantBox && !activeAssistantBox.dataset.feedbackDone) {
+            appendFeedbackRow(activeAssistantBox);
+            activeAssistantBox.dataset.feedbackDone = "1";
+          }
+          setBusy(false);
+          // 一次性加载完整历史（补全可能因流式速度遗漏的内容）
+          loadHistoricalMessages(sid, false);
+          loadSessionsList();
+          updateContextUsage(sid);
+        }
       };
 
       activeSseSource.onmessage = handleEvt;
       activeSseSource.addEventListener("text-partial", handleEvt);
       activeSseSource.addEventListener("ui", handleEvt);
+      activeSseSource.addEventListener("busy", handleEvt);
       activeSseSource.addEventListener("idle", handleEvt);
       activeSseSource.addEventListener("closed", handleEvt);
+      activeSseSource.onerror = function() {
+        // SSE 断线自动重连（浏览器内置），此处不做额外处理
+      };
     }
 
     async function initApp() {
@@ -4161,7 +4199,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                         {
                             "id": r[0],
                             "title": r[1] or "未命名任务",
-                            "directory": r[2] or os.path.expanduser("~"),
+                            "directory": r[2] or "/Users/zhouzheng",
                             "time": {"created": r[3], "updated": r[4]},
                         }
                         for r in rows
