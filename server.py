@@ -1783,97 +1783,31 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       word-break: break-all;
     }
 
-    /* 现代交互式动态思考/执行状态卡片 */
-    .mimo-thinking-card {
-      background: linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.94));
-      border: 1px solid rgba(226, 232, 240, 0.85);
-      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.03);
-      border-radius: 12px;
-      padding: 12px 14px;
-      margin: 8px 0 10px 0;
-      position: relative;
-      overflow: hidden;
-      animation: fadeInThinking 0.3s ease-out;
-    }
-    @keyframes fadeInThinking {
-      from { opacity: 0; transform: translateY(4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .mimo-thinking-card::before {
-      content: "";
-      position: absolute;
-      top: 0; left: -100%; width: 50%; height: 100%;
-      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), transparent);
-      animation: thinkingShimmer 2.2s infinite ease-in-out;
-      pointer-events: none;
-    }
-    @keyframes thinkingShimmer {
-      0% { left: -100%; }
-      100% { left: 200%; }
-    }
-    .thinking-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .thinking-spinner-ring {
-      width: 16px;
-      height: 16px;
-      border: 2px solid rgba(2, 132, 199, 0.2);
-      border-top-color: #0284C7;
-      border-radius: 50%;
-      animation: spinThinking 0.8s linear infinite;
-      flex-shrink: 0;
-    }
-    @keyframes spinThinking {
-      to { transform: rotate(360deg); }
-    }
-    .thinking-status-text {
-      font-size: 13px;
-      font-weight: 600;
-      color: #1E293B;
-      letter-spacing: -0.2px;
-    }
-    .typing-bouncing-dots {
+    /* 极简思考状态提示（无外框卡片） */
+    .mimo-thinking-text {
+      font-size: 14px;
+      color: var(--text-muted, #86868B);
+      padding: 6px 4px;
+      margin: 2px 0 6px 0;
       display: inline-flex;
       align-items: center;
-      gap: 3px;
-      margin-left: 2px;
+      line-height: 1.5;
+      user-select: none;
+      animation: fadeInThinking 0.25s ease-out;
     }
-    .typing-bouncing-dots span {
-      width: 4px;
-      height: 4px;
-      background-color: #0284C7;
-      border-radius: 50%;
-      animation: bounceDot 1.4s infinite ease-in-out both;
+    @keyframes fadeInThinking {
+      from { opacity: 0; transform: translateY(2px); }
+      to { opacity: 1; transform: translateY(0); }
     }
-    .typing-bouncing-dots span:nth-child(1) { animation-delay: -0.32s; }
-    .typing-bouncing-dots span:nth-child(2) { animation-delay: -0.16s; }
-    .typing-bouncing-dots span:nth-child(3) { animation-delay: 0s; }
-    @keyframes bounceDot {
-      0%, 80%, 100% { transform: scale(0.6); opacity: 0.35; }
-      40% { transform: scale(1.15); opacity: 1; }
+    .dot-pulse {
+      display: inline-block;
+      letter-spacing: 2px;
+      animation: dotPulse 1.4s infinite ease-in-out;
     }
-    .thinking-badge-timer {
-      margin-left: auto;
-      font-size: 11px;
-      font-family: var(--font-mono);
-      color: #0284C7;
-      background: rgba(2, 132, 199, 0.08);
-      padding: 2px 7px;
-      border-radius: 10px;
-      font-weight: 600;
-      flex-shrink: 0;
-    }
-    .thinking-sub-desc {
-      margin-top: 6px;
-      font-size: 11.5px;
-      color: #64748B;
-      line-height: 1.4;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      transition: color 0.2s ease;
+    @keyframes dotPulse {
+      0%, 20% { opacity: 0.25; }
+      50% { opacity: 1; }
+      100% { opacity: 0.25; }
     }
 
     /* 助手消息底部的真实操作栏 */
@@ -4316,80 +4250,40 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       box.querySelector(".thinking-content").textContent = text;
     }
 
-    let thinkingInterval = null;
     let busyStartTime = 0;
 
-    function showThinkingCard(wrap, initialText, initialSub) {
-      removeThinkingCard(wrap);
-      const card = document.createElement("div");
-      card.className = "mimo-thinking-card";
-      card.id = "active-thinking-card";
-      card.innerHTML = `
-        <div class="thinking-header">
-          <div class="thinking-spinner-ring"></div>
-          <span class="thinking-status-text">${escapeHtml(initialText || "MiMo 正在深度思考")}</span>
-          <div class="typing-bouncing-dots">
-            <span></span><span></span><span></span>
-          </div>
-          <span class="thinking-badge-timer">0.0s</span>
-        </div>
-        <div class="thinking-sub-desc">${escapeHtml(initialSub || "已连接本地引擎，模型正在构思方案...")}</div>
-      `;
-      wrap.appendChild(card);
-      const startTime = Date.now();
-      if (thinkingInterval) clearInterval(thinkingInterval);
-      thinkingInterval = setInterval(() => {
-        const timerEl = card.querySelector(".thinking-badge-timer");
-        if (timerEl) {
-          const sec = ((Date.now() - startTime) / 1000).toFixed(1);
-          timerEl.textContent = sec + "s";
-        }
-        const subEl = card.querySelector(".thinking-sub-desc");
-        const elapsed = (Date.now() - startTime) / 1000;
-        if (subEl && !card.dataset.customSub) {
-          if (elapsed < 3) {
-            subEl.textContent = "已建立引擎通道，等待模型首字响应...";
-          } else if (elapsed < 8) {
-            subEl.textContent = "模型正在进行多步推理与上下文分析...";
-          } else if (elapsed < 16) {
-            subEl.textContent = "正在分析任务逻辑，准备调度工具或生成方案...";
-          } else {
-            subEl.textContent = "正在深度运算中，请耐心等待...";
-          }
-        }
-      }, 100);
+    function showThinkingIndicator(wrap) {
+      removeThinkingIndicator(wrap);
+      if (!wrap) return null;
+      const el = document.createElement("div");
+      el.className = "mimo-thinking-text";
+      el.id = "active-thinking-indicator";
+      el.innerHTML = '思考中<span class="dot-pulse">...</span>';
+      wrap.appendChild(el);
       const vp = document.getElementById("chat-viewport");
-      vp.scrollTop = vp.scrollHeight;
-      return card;
+      if (vp) vp.scrollTop = vp.scrollHeight;
+      return el;
+    }
+
+    function removeThinkingIndicator(wrap) {
+      if (wrap) {
+        const el = wrap.querySelector(".mimo-thinking-text");
+        if (el) el.remove();
+      }
+      const el = document.getElementById("active-thinking-indicator");
+      if (el) el.remove();
+    }
+
+    function showThinkingCard(wrap) {
+      return showThinkingIndicator(wrap);
     }
 
     function updateThinkingCard(wrap, statusText, subDesc) {
-      if (!wrap) return;
-      const card = wrap.querySelector(".mimo-thinking-card");
-      if (!card) return;
-      if (statusText) {
-        const stEl = card.querySelector(".thinking-status-text");
-        if (stEl) stEl.textContent = statusText;
-      }
-      if (subDesc) {
-        card.dataset.customSub = "1";
-        const subEl = card.querySelector(".thinking-sub-desc");
-        if (subEl) subEl.textContent = subDesc;
-      }
+      // 保持极简纯净，不做多余卡片堆叠
     }
 
     function removeThinkingCard(wrap) {
-      if (thinkingInterval) {
-        clearInterval(thinkingInterval);
-        thinkingInterval = null;
-      }
-      if (wrap) {
-        const card = wrap.querySelector(".mimo-thinking-card");
-        if (card) card.remove();
-      } else {
-        const card = document.getElementById("active-thinking-card");
-        if (card) card.remove();
-      }
+      removeThinkingIndicator(wrap);
     }
 
     function addToolCard(wrap, callId, tool, status, inputData, outputData) {
@@ -4515,7 +4409,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
       activeAssistantBox = appendAssistantBox();
       activeProseCard = null;
-      showThinkingCard(activeAssistantBox, "MiMo 正在深度思考", "已连接本地引擎，模型正在构思方案...");
+      showThinkingIndicator(activeAssistantBox);
 
       // 确保 SSE 已连接（发送消息前 SSE 就应已建立，这里是双保险）
       if (!activeSseSource || activeSseSource.readyState === EventSource.CLOSED) {
@@ -4626,14 +4520,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
           } else if (ui.kind === "tool") {
             // 工具调用卡片实时更新
+            removeThinkingIndicator(activeAssistantBox);
             const out = ui.output || "";
             addToolCard(activeAssistantBox, ui.callID, ui.tool, ui.status, ui.input, out);
-            if (ui.status === "running") {
-              const cmdPreview = ui.input?.command || ui.input?.path || ui.input?.query || ui.tool;
-              updateThinkingCard(activeAssistantBox, `正在执行: ${ui.tool}`, cmdPreview);
-            } else if (ui.status === "completed") {
-              updateThinkingCard(activeAssistantBox, "MiMo 正在整理结果", `工具 ${ui.tool} 执行完毕`);
-            }
 
           } else if (ui.kind === "title") {
             // 会话标题更新
@@ -4641,10 +4530,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             if (titleEl && ui.title) titleEl.textContent = ui.title;
           }
 
-        // ── permission 权限事件（自动准许提示）────────────────
+        // ── permission 权限事件（已自动准许）────────────────
         } else if (type === "permission" || type === "permission.asked") {
-          const permName = ev.req?.permission || "工具";
-          updateThinkingCard(activeAssistantBox, `已准许执行: ${permName}`, "已自动通过完全访问权限验证");
+          // no-op (已全局放行)
 
         // ── busy 心跳（忽略，不做任何处理）─────────────────────
         } else if (type === "busy") {
