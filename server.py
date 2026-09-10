@@ -254,34 +254,101 @@ def set_current_model(model_id: str) -> bool:
     return False
 
 
+def format_token_lx(val: int) -> str:
+    """1:1 还原客户端 Lx 缩写算法 (K / M 换算)"""
+    if val >= 1_000_000:
+        return f"{val / 1_000_000:.1f}M"
+    elif val >= 1_000:
+        return f"{val / 1_000:.1f}K"
+    return str(val)
+
+
 def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
-    """读取当前会话在本地 SQLite 中的真实 Token 上下文消耗与缓存命中率"""
+    """1:1 深度对齐 Xiaomi MiMo 客户端 A0e / TD / b0e 算法读取真实 Token 消耗"""
     if not os.path.exists(MIMO_DB_PATH):
-        return {"ok": True, "total": 0, "limit": 200000, "pct": 0, "remaining_pct": 100, "cache_hit": 0, "model": "mimo-auto"}
+        return {
+            "ok": True,
+            "total": 0,
+            "total_fmt": "0",
+            "limit": 200000,
+            "limit_fmt": "200K",
+            "pct": 0,
+            "remaining_pct": 100,
+            "cache_hit": 0,
+            "model": "mimo-auto",
+        }
     try:
         conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
         cur = conn.cursor()
-        if session_id:
+        # 若未显式传入 session_id，则无缝对齐电脑端当前激活的高亮会话
+        target_sid = session_id or get_desktop_current_session_id()
+        if target_sid:
             cur.execute(
-                "SELECT data FROM message WHERE session_id = ? AND data LIKE '%\"tokens\"%' ORDER BY time_created DESC LIMIT 1",
-                (session_id,)
+                "SELECT data FROM message WHERE session_id = ? ORDER BY time_created DESC",
+                (target_sid,)
             )
         else:
             cur.execute(
-                "SELECT data FROM message WHERE data LIKE '%\"tokens\"%' ORDER BY time_created DESC LIMIT 1"
+                "SELECT data FROM message ORDER BY time_created DESC LIMIT 60"
             )
-        row = cur.fetchone()
+        rows = cur.fetchall()
         conn.close()
-        if not row:
-            return {"ok": True, "total": 0, "limit": 200000, "pct": 0, "remaining_pct": 100, "cache_hit": 0, "model": "mimo-auto"}
-        data = json.loads(row[0])
-        tokens = data.get("tokens", {})
-        total = tokens.get("total", 0)
-        inp = tokens.get("input", 0)
-        outp = tokens.get("output", 0)
-        cache = tokens.get("cache", {})
-        cache_read = cache.get("read", 0) if isinstance(cache, dict) else 0
-        model_id = data.get("modelID", "mimo-x-pro-preview")
+
+        # 严格对齐客户端 A0e 回溯遍历过滤算法：
+        # 倒序查找第一个有效结算（TD(r) > 0）的 assistant 轮次，自动跳过尚在流式或 0 token 的中间态消息
+        found_tokens = None
+        found_data = None
+        for r in rows:
+            try:
+                d = json.loads(r[0])
+                if d.get("role") != "assistant":
+                    continue
+                tok = d.get("tokens")
+                if not tok or not isinstance(tok, dict):
+                    continue
+                inp = tok.get("input", 0) or 0
+                outp = tok.get("output", 0) or 0
+                cache = tok.get("cache", {}) or {}
+                cache_read = cache.get("read", 0) or 0
+                cache_write = cache.get("write", 0) or 0
+
+                # 官方 TD 公式: (input||0) + (cacheRead||0) + (cacheWrite||0) + (output||0)
+                calc_total = inp + cache_read + cache_write + outp
+                if calc_total <= 0:
+                    continue  # 忽略未结算或进行中的 0 token 消息，与官方 A0e 保持完全一致
+
+                found_tokens = {
+                    "total": calc_total,
+                    "input": inp,
+                    "output": outp,
+                    "cache_read": cache_read,
+                    "cache_write": cache_write,
+                }
+                found_data = d
+                break
+            except Exception:
+                continue
+
+        if not found_tokens:
+            return {
+                "ok": True,
+                "total": 0,
+                "total_fmt": "0",
+                "limit": 200000,
+                "limit_fmt": "200K",
+                "pct": 0,
+                "remaining_pct": 100,
+                "cache_hit": 0,
+                "model": "mimo-auto",
+            }
+
+        total = found_tokens["total"]
+        inp = found_tokens["input"]
+        outp = found_tokens["output"]
+        cache_read = found_tokens["cache_read"]
+        cache_write = found_tokens["cache_write"]
+        model_id = (found_data or {}).get("modelID", "mimo-auto")
+
         limit = 200000
         if "claude" in model_id.lower():
             limit = 200000
@@ -289,23 +356,42 @@ def get_context_usage(session_id: Optional[str] = None) -> Dict[str, Any]:
             limit = 128000
         elif "flash" in model_id.lower() or "pro" in model_id.lower() or "mimo" in model_id.lower():
             limit = 200000
+
+        # 官方 jD / x0e 百分比算法
         pct = round((total / limit) * 100, 1) if limit > 0 else 0
         remaining_pct = round(max(0.0, 100.0 - pct), 1)
-        cache_hit = round((cache_read / max(1, total)) * 100) if total > 0 else 0
+
+        # 官方 b0e 缓存命中率算法：cacheRead / (cacheRead + cacheWrite + input)
+        denom = cache_read + cache_write + inp
+        cache_hit = round((cache_read / denom) * 100) if denom > 0 else 0
+
         return {
             "ok": True,
             "total": total,
+            "total_fmt": format_token_lx(total),
             "input": inp,
             "output": outp,
             "cache_read": cache_read,
+            "cache_write": cache_write,
             "limit": limit,
+            "limit_fmt": format_token_lx(limit),
             "pct": pct,
             "remaining_pct": remaining_pct,
             "cache_hit": cache_hit,
             "model": model_id,
         }
     except Exception as e:
-        return {"ok": False, "error": str(e), "total": 0, "limit": 200000, "pct": 0, "remaining_pct": 100, "cache_hit": 0}
+        return {
+            "ok": False,
+            "error": str(e),
+            "total": 0,
+            "total_fmt": "0",
+            "limit": 200000,
+            "limit_fmt": "200K",
+            "pct": 0,
+            "remaining_pct": 100,
+            "cache_hit": 0,
+        }
 
 
 def get_all_plugins() -> List[Dict[str, Any]]:
@@ -2549,13 +2635,16 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         const cacheEl = document.getElementById("ctx-hud-cache");
         const modelEl = document.getElementById("ctx-hud-model");
 
+        const totalFmt = d.total_fmt || (total >= 1000 ? (total / 1000).toFixed(1) + "K" : total);
+        const limitFmt = d.limit_fmt || (limit >= 1000 ? (limit / 1000).toFixed(0) + "K" : limit);
+
         if (pctVal) pctVal.textContent = pct.toFixed(1) + "%";
-        if (pctRem) pctRem.textContent = `剩余 ${rem}%`;
+        if (pctRem) pctRem.textContent = `(剩余 ${rem}%)`;
         if (barFill) {
           barFill.style.width = pct + "%";
           barFill.style.background = pct >= 85 ? "#EF4444" : (pct >= 60 ? "#F59E0B" : "var(--primary)");
         }
-        if (tokensEl) tokensEl.textContent = `已用 ${Number(total).toLocaleString()} · 共 ${Number(limit).toLocaleString()}`;
+        if (tokensEl) tokensEl.textContent = `已用 ${totalFmt}，共 ${limitFmt} (${Number(total).toLocaleString()} tokens)`;
         if (cacheEl) {
           if (cacheHit > 0) {
             cacheEl.style.display = "block";
