@@ -1,0 +1,4 @@
+# Xiaomi MiMo PWA 网关具备完全的零依赖 (Zero-Dependency) 设计。
+# 仅依赖 Python 3 标准库（http.server, sqlite3, ssl, urllib, zlib 等）。
+# 运行环境需求：
+# Python >= 3.9

@@ -1,0 +1,33 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Certificates & Secrets
+*.crt
+*.key
+*.pem
+certs/
+
+# OS Specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Virtual Environments
+venv/
+env/
+.env
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
