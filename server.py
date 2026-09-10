@@ -4040,6 +4040,24 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         `;
       });
 
+      // 实时流式输出中尚未闭合的代码块（避免直到闭合才突然跳变）
+      safe = safe.replace(/```(\\w*)?\\n([\\s\\S]*)$/g, function(match, lang, code) {
+        lang = lang || "code";
+        const lines = code.split("\\n");
+        const lineNums = lines.map((_, i) => i + 1).join("\\n");
+        return `
+          <div class="mimo-code-card">
+            <div class="code-card-header">
+              <span>${lang} (输入中...)</span>
+            </div>
+            <div class="code-card-body">
+              <div class="code-line-nums">${lineNums}</div>
+              <pre><code>${code}</code></pre>
+            </div>
+          </div>
+        `;
+      });
+
       safe = safe.replace(/`([^`]+)`/g, "<code style='background:#F1F3F5;padding:2px 5px;border-radius:4px;font-family:var(--font-mono);font-size:12.5px;'>$1</code>");
       safe = safe.replace(/\\*\\*([^\\*]+)\\*\\*/g, "<strong>$1</strong>");
       safe = safe.replace(/\\n/g, "<br>");
@@ -4165,7 +4183,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
                   const out = p.state?.output || p.state?.metadata?.output || "";
                   addToolCard(wrap, p.callID, p.tool, p.state?.status, p.state?.input, out);
                 } else if (p.type === "text" && p.text) {
-                  addProseText(wrap, p.text);
+                  addProseText(wrap, p.text, p.id);
                 }
               });
               appendFeedbackRow(wrap);
@@ -4220,16 +4238,67 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       return wrap;
     }
 
-    function addProseText(wrap, text) {
-      let c = wrap.querySelector(".assistant-prose-card");
-      if (!c) {
-        c = document.createElement("div");
-        c.className = "assistant-prose-card";
-        wrap.appendChild(c);
+    let activeTextCard = null;
+    let activeTextPartId = null;
+    let pendingRenderRaf = null;
+    let pendingRenderCard = null;
+    let pendingRenderText = "";
+
+    function flushProseRender() {
+      if (pendingRenderRaf) {
+        cancelAnimationFrame(pendingRenderRaf);
+        pendingRenderRaf = null;
+        if (pendingRenderCard && pendingRenderText !== undefined) {
+          pendingRenderCard.innerHTML = formatCodeBlocks(pendingRenderText);
+          const vp = document.getElementById("chat-viewport");
+          if (vp) vp.scrollTop = vp.scrollHeight;
+        }
       }
-      c.innerHTML = formatCodeBlocks(text);
+    }
+
+    function appendProseCard(wrap, partId) {
+      if (!wrap) wrap = appendAssistantBox();
+      if (partId && partId !== "default") {
+        const existing = wrap.querySelector(`.assistant-prose-card[data-part-id="${partId}"]`);
+        if (existing) return existing;
+      }
+      const c = document.createElement("div");
+      c.className = "assistant-prose-card";
+      if (partId && partId !== "default") {
+        c.dataset.partId = partId;
+      }
+      wrap.appendChild(c);
       const vp = document.getElementById("chat-viewport");
-      vp.scrollTop = vp.scrollHeight;
+      if (vp) vp.scrollTop = vp.scrollHeight;
+      return c;
+    }
+
+    function updateProseContent(card, fullText) {
+      if (!card) return;
+      card.dataset.rawText = fullText;
+      card.dataset.rawLength = String(fullText.length);
+      pendingRenderCard = card;
+      pendingRenderText = fullText;
+
+      if (!pendingRenderRaf) {
+        pendingRenderRaf = requestAnimationFrame(() => {
+          pendingRenderRaf = null;
+          if (pendingRenderCard) {
+            pendingRenderCard.innerHTML = formatCodeBlocks(pendingRenderText);
+            const vp = document.getElementById("chat-viewport");
+            if (vp) vp.scrollTop = vp.scrollHeight;
+          }
+        });
+      }
+    }
+
+    function addProseText(wrap, text, partId) {
+      const c = appendProseCard(wrap, partId);
+      c.innerHTML = formatCodeBlocks(text);
+      c.dataset.rawText = text;
+      c.dataset.rawLength = String((text || "").length);
+      const vp = document.getElementById("chat-viewport");
+      if (vp) vp.scrollTop = vp.scrollHeight;
       return c;
     }
 
@@ -4360,9 +4429,21 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
               const isDone = (info.finish === "stop" || (info.time && info.time.completed)) && !hasRunningTool;
               if (isDone) {
                 stopBusyWatch();
-                removeThinkingCard(activeAssistantBox);
+                removeThinkingIndicator(activeAssistantBox);
+                flushProseRender();
+                if (activeAssistantBox && activeAssistantBox.children.length > 0) {
+                  if (!activeAssistantBox.dataset.feedbackDone) {
+                    appendFeedbackRow(activeAssistantBox);
+                    activeAssistantBox.dataset.feedbackDone = "1";
+                  }
+                } else {
+                  loadHistoricalMessages(sid, false);
+                }
                 setBusy(false);
-                loadHistoricalMessages(sid, false);
+                activeAssistantBox = null;
+                activeTextCard = null;
+                activeTextPartId = null;
+                activeToolsMap = {};
                 loadSessionsList();
                 updateContextUsage(sid);
               }
@@ -4371,10 +4452,10 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         } catch(e) {}
         if (count > 240) { // 6 分钟超时兜底
           stopBusyWatch();
-          removeThinkingCard(activeAssistantBox);
+          removeThinkingIndicator(activeAssistantBox);
           setBusy(false);
         }
-      }, 1500);
+      }, 2000);
     }
 
     function stopBusyWatch() {
@@ -4408,7 +4489,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       setBusy(true);
 
       activeAssistantBox = appendAssistantBox();
-      activeProseCard = null;
+      activeTextCard = null;
+      activeTextPartId = null;
+      activeToolsMap = {};
       showThinkingIndicator(activeAssistantBox);
 
       // 确保 SSE 已连接（发送消息前 SSE 就应已建立，这里是双保险）
@@ -4416,7 +4499,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         connectSessionSSE(currentSessionId);
       }
 
-      // 启动智能兜底轮询保障（1.5s），即使网络丢包或 SSE 挂起也能实时捕捉回复
+      // 启动智能兜底轮询保障（2s），即使网络丢包或 SSE 挂起也能实时捕捉回复
       startBusyWatch(currentSessionId);
 
       try {
@@ -4440,15 +4523,15 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         }
         if (!r.ok) {
           stopBusyWatch();
-          removeThinkingCard(activeAssistantBox);
+          removeThinkingIndicator(activeAssistantBox);
           const errMsg = res.error || res.message || res.code || `引擎响应异常 (HTTP ${r.status})`;
-          activeProseCard = addProseText(activeAssistantBox, "❌ 调度出错: " + errMsg);
+          addProseText(activeAssistantBox, "❌ 调度出错: " + errMsg);
           setBusy(false);
         }
       } catch (e) {
         stopBusyWatch();
-        removeThinkingCard(activeAssistantBox);
-        activeProseCard = addProseText(activeAssistantBox, "❌ 请求失败: " + e.message);
+        removeThinkingIndicator(activeAssistantBox);
+        addProseText(activeAssistantBox, "❌ 请求失败: " + e.message);
         setBusy(false);
       }
     }
@@ -4457,7 +4540,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       isBusy = busy;
       if (!busy) {
         stopBusyWatch();
-        removeThinkingCard(activeAssistantBox);
+        removeThinkingIndicator(activeAssistantBox);
       }
       const btn = document.getElementById("btn-dock-send");
       if (busy) {
@@ -4477,16 +4560,21 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         return;
       }
       stopBusyWatch();
-      removeThinkingCard(activeAssistantBox);
+      removeThinkingIndicator(activeAssistantBox);
+      flushProseRender();
       try {
         await fetch("/api/abort", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: currentSessionId })
         });
-        if (activeProseCard) activeProseCard.innerHTML += "<br><em>[已发送 Abort 中止信号]</em>";
+        if (activeTextCard) activeTextCard.innerHTML += "<br><em>[已发送 Abort 中止信号]</em>";
       } catch (e) {}
       setBusy(false);
+      activeAssistantBox = null;
+      activeTextCard = null;
+      activeTextPartId = null;
+      activeToolsMap = {};
     }
 
     function connectSessionSSE(sid) {
@@ -4502,25 +4590,44 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         try { ev = JSON.parse(e.data); } catch(_) { return; }
         const type = ev.type || e.type;
 
-        // ── 文本流（累积全文，每次覆盖）──────────────────────────
+        // ── 文本流（累积全文，平滑流畅渲染）──────────────────────────
         if (type === "text-partial" && typeof ev.text === "string") {
           if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
-          removeThinkingCard(activeAssistantBox);
-          activeProseCard = addProseText(activeAssistantBox, ev.text);
+          removeThinkingIndicator(activeAssistantBox);
+          if (!activeTextCard) {
+            activeTextCard = appendProseCard(activeAssistantBox, activeTextPartId || "default");
+          }
+          updateProseContent(activeTextCard, ev.text);
 
         // ── ui 事件（tool / text / title / usage）───────────────
         } else if (type === "ui" && ev.ui) {
           const ui = ev.ui;
           if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
 
-          if (ui.kind === "text" && typeof ui.text === "string") {
-            // 最终文本（与 text-partial 同源，已是全文）
-            removeThinkingCard(activeAssistantBox);
-            activeProseCard = addProseText(activeAssistantBox, ui.text);
+          if (ui.kind === "text") {
+            removeThinkingIndicator(activeAssistantBox);
+            // 检查是否切换到了新的 text part（多步输出支持）
+            if (ui.partID && ui.partID !== activeTextPartId) {
+              activeTextPartId = ui.partID;
+              activeTextCard = appendProseCard(activeAssistantBox, ui.partID);
+            } else if (!activeTextCard) {
+              activeTextCard = appendProseCard(activeAssistantBox, ui.partID || "default");
+            }
+            // 若 ui.text 带有比当前更长内容（如最终文本），平滑更新
+            if (typeof ui.text === "string") {
+              const curLen = parseInt(activeTextCard.dataset.rawLength || "0", 10);
+              if (ui.text.length > curLen) {
+                updateProseContent(activeTextCard, ui.text);
+              }
+            }
 
           } else if (ui.kind === "tool") {
-            // 工具调用卡片实时更新
+            // 工具调用卡片实时更新：工具产生时，前一段文本已结束
             removeThinkingIndicator(activeAssistantBox);
+            flushProseRender();
+            activeTextCard = null;
+            activeTextPartId = null;
+
             const out = ui.output || "";
             addToolCard(activeAssistantBox, ui.callID, ui.tool, ui.status, ui.input, out);
 
@@ -4540,14 +4647,18 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
         // ── idle：AI 完成 ─────────────────────────────────────
         } else if (type === "idle" || type === "session.idle") {
-          removeThinkingCard(activeAssistantBox);
+          removeThinkingIndicator(activeAssistantBox);
+          flushProseRender();
           if (activeAssistantBox && !activeAssistantBox.dataset.feedbackDone) {
             appendFeedbackRow(activeAssistantBox);
             activeAssistantBox.dataset.feedbackDone = "1";
           }
           setBusy(false);
-          // 一次性加载完整历史（补全可能因流式速度遗漏的内容）
-          loadHistoricalMessages(sid, false);
+          activeAssistantBox = null;
+          activeTextCard = null;
+          activeTextPartId = null;
+          activeToolsMap = {};
+          stopBusyWatch();
           loadSessionsList();
           updateContextUsage(sid);
         }
