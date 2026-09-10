@@ -257,9 +257,11 @@ def set_current_model(model_id: str) -> bool:
 def format_token_lx(val: int) -> str:
     """1:1 还原客户端 Lx 缩写算法 (K / M 换算)"""
     if val >= 1_000_000:
-        return f"{val / 1_000_000:.1f}M"
+        s = f"{val / 1_000_000:.1f}M"
+        return s.replace(".0M", "M")
     elif val >= 1_000:
-        return f"{val / 1_000:.1f}K"
+        s = f"{val / 1_000:.1f}K"
+        return s.replace(".0K", "K")
     return str(val)
 
 
