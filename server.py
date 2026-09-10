@@ -692,6 +692,72 @@ def get_weekly_usage() -> Dict[str, Any]:
         return {"ok": False, "error": str(e), "days": [], "total_week": 0, "total_today": 0}
 
 
+def get_user_quota() -> Dict[str, Any]:
+    """通过 Xiaomi SSO passToken 调用外部 API 获取订阅配额剩余量
+    等同于 app 端「剩余用量」面板：显示 percent + resetDate（1周周期）
+    API: GET {baseUrl}/user/usage  → {code:0, data:{percent, resetDate}}
+    """
+    import shutil, tempfile, urllib.request, urllib.error
+
+    # 1. 从 Electron Cookies DB 读取 SSO credentials
+    cookie_path = os.path.expanduser(
+        "~/Library/Application Support/Xiaomi MiMo/Partitions/xiaomi-account/Cookies"
+    )
+    pass_token = None
+    user_id = None
+    try:
+        tmp = tempfile.mktemp(suffix=".db")
+        shutil.copy2(cookie_path, tmp)
+        conn = sqlite3.connect(tmp, timeout=3)
+        c = conn.cursor()
+        c.execute("SELECT name, value FROM cookies WHERE name IN ('passToken','userId','cUserId')")
+        for name, val in c.fetchall():
+            if name == "passToken":
+                pass_token = val
+            elif name == "userId":
+                user_id = val
+        conn.close()
+        os.unlink(tmp)
+    except Exception:
+        pass
+
+    if not pass_token or not user_id:
+        return {"ok": False, "reason": "no-sso", "percent": None, "resetDate": None}
+
+    # 2. 尝试用 SSO cookie 直接调用 xiaomimimo.com 的用量 API
+    # (app 内部用 authFetch，使用登录时换取的 JWT；我们用 SSO cookie 尝试)
+    candidate_urls = [
+        "https://api.xiaomimimo.com/user/usage",
+        "https://api.xiaomimimo.com/v1/user/usage",
+    ]
+    cookie_str = f"passToken={pass_token}; userId={user_id}"
+
+    for url in candidate_urls:
+        try:
+            req = urllib.request.Request(url, headers={
+                "Cookie": cookie_str,
+                "User-Agent": "MiMo Desktop/1.0 (macOS)",
+                "Accept": "application/json",
+            })
+            resp = urllib.request.urlopen(req, timeout=8)
+            data = json.loads(resp.read().decode())
+            if isinstance(data, dict) and data.get("code") == 0:
+                d = data.get("data", {})
+                return {
+                    "ok": True,
+                    "percent": d.get("percent"),
+                    "resetDate": d.get("resetDate"),
+                    "period": "1 周",
+                }
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                return {"ok": False, "reason": "auth-expired", "percent": None, "resetDate": None}
+        except Exception:
+            continue
+
+    return {"ok": False, "reason": "failed", "percent": None, "resetDate": None}
+
+
 def get_user_profile() -> Dict[str, Any]:
     """读取客户端当前登录的小米账号昵称与用户 ID"""
     name = "Nelson"
@@ -1409,6 +1475,64 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       font-size: 10px;
       color: var(--text-dim);
       margin-top: 1px;
+    }
+
+    /* 订阅配额剩余区块 */
+    .quota-section {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .quota-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-dim);
+      letter-spacing: 0.04em;
+      margin-bottom: 8px;
+    }
+    .quota-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .quota-meta {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .quota-chip {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-main);
+      background: var(--bg-input);
+      border-radius: 6px;
+      padding: 2px 7px;
+    }
+    .quota-expire {
+      font-size: 10px;
+      color: var(--text-dim);
+    }
+    .quota-bar-bg {
+      flex: 1;
+      height: 4px;
+      border-radius: 2px;
+      background: var(--border-subtle);
+      overflow: hidden;
+    }
+    .quota-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--accent);
+      transition: width 0.4s ease;
+    }
+    .quota-bar-fill.low { background: #ef4444; }
+    .quota-bar-fill.mid { background: #f59e0b; }
+    .quota-loading {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: center;
+      padding: 4px 0;
     }
 
     /* 消息视窗 */
@@ -2603,6 +2727,11 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         <div class="weekly-stat-lbl">本周合计</div>
       </div>
     </div>
+    <!-- 订阅配额剩余量 -->
+    <div class="quota-section">
+      <div class="quota-label">剩余用量</div>
+      <div id="quota-content" class="quota-loading">加载中…</div>
+    </div>
   </div>
 
   <!-- 消息流视窗 -->
@@ -2830,12 +2959,18 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (ctxPop) ctxPop.style.display = "none";
 
       pop.classList.add("open");
-      // 加载数据
-      try {
-        const r = await fetch("/api/weekly-usage");
-        const data = await r.json();
-        if (data.ok) renderWeeklyChart(data);
-      } catch(err) {}
+      // 重置配额区块为加载中
+      const qEl = document.getElementById("quota-content");
+      if (qEl) qEl.innerHTML = '<span class="quota-loading">加载中…</span>';
+
+      // 并行加载 token 用量 + 订阅配额
+      Promise.all([
+        fetch("/api/weekly-usage").then(r => r.json()).catch(() => null),
+        fetch("/api/user-quota").then(r => r.json()).catch(() => null),
+      ]).then(([weekData, quotaData]) => {
+        if (weekData?.ok) renderWeeklyChart(weekData);
+        renderQuota(quotaData);
+      });
     }
 
     function renderWeeklyChart(data) {
@@ -2861,6 +2996,47 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (n >= 1000000) return (n/1000000).toFixed(1) + "M";
       if (n >= 1000) return (n/1000).toFixed(1) + "K";
       return String(n);
+    }
+
+    function renderQuota(data) {
+      const el = document.getElementById("quota-content");
+      if (!el) return;
+
+      if (!data || !data.ok) {
+        const reason = data?.reason;
+        if (reason === "auth-expired") {
+          el.innerHTML = '<span class="quota-loading">登录已过期，请在 app 中重新登录</span>';
+        } else if (reason === "no-sso") {
+          el.innerHTML = '<span class="quota-loading">请先在 app 中登录小米账号</span>';
+        } else {
+          el.innerHTML = '<span class="quota-loading">无法获取，请在 app 中查看</span>';
+        }
+        return;
+      }
+
+      const pct = typeof data.percent === "number" ? Math.round(data.percent) : null;
+      const resetDate = data.resetDate || "—";
+      const period = data.period || "1 周";
+
+      // 进度条颜色
+      const fillCls = pct !== null ? (pct <= 15 ? "low" : pct <= 40 ? "mid" : "") : "";
+      const pctText = pct !== null ? pct + "%" : "—";
+
+      el.innerHTML = `
+        <div class="quota-row">
+          <div class="quota-meta">
+            <span class="quota-chip">${period}</span>
+            <span class="quota-chip">${pctText}</span>
+            <span class="quota-expire">${resetDate}</span>
+          </div>
+        </div>
+        <div style="margin-top:6px;display:flex;align-items:center;gap:8px;">
+          <div class="quota-bar-bg">
+            <div class="quota-bar-fill ${fillCls}" style="width:${pct ?? 0}%"></div>
+          </div>
+          <span style="font-size:10px;color:var(--text-dim);white-space:nowrap;">剩余 ${pctText}</span>
+        </div>
+      `;
     }
 
     // 点击页面其他区域关闭弹窗
@@ -4465,6 +4641,11 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
         # 周用量统计
         elif path == "/api/weekly-usage":
             self.send_json(200, get_weekly_usage())
+            return
+
+        # 订阅配额剩余量（通过 SSO cookies 调用外部 API）
+        elif path == "/api/user-quota":
+            self.send_json(200, get_user_quota())
             return
 
         # 13. 插件与技能中心列表 API
