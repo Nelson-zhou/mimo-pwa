@@ -39,6 +39,16 @@ COMPOSER_INPUT_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi M
 XIAOMI_CONFIRMED_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/xiaomi-last-confirmed.json")
 PREFERENCES_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
 AVATAR_PNG_PATH = "/Users/zhouzheng/.gemini/antigravity/scratch/avatar_circle.png"
+AVATAR_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mimo-pwa", "assets", "avatars")
+LEVELDB_DIR = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/Local Storage/leveldb")
+# avatar-id → filename mapping (from app.asar decompile)
+AVATAR_FILE_MAP = {
+    "avatar-1": "avatar-1-B6KwUrRj.png",
+    "avatar-2": "avatar-2-w0iv7mdV.png",
+    "avatar-3": "avatar-3-DV2ldWBE.png",
+    "avatar-4": "avatar-4-i1E2Uex3.png",
+    "avatar-5": "avatar-5-DZ-nyoXt.png",
+}
 
 
 def load_desktop_api_credentials() -> Tuple[Optional[int], Optional[str]]:
@@ -564,6 +574,122 @@ def set_plugin_enabled(plugin_id: str, enabled: bool) -> bool:
         print("Error saving plugin state:", e)
         return False
 
+
+
+def get_desktop_avatar_png() -> bytes:
+    """从 LevelDB 读取 mimo.set.avatar 设置，返回对应官方头像 PNG 字节
+    联动逻辑：与 app 端完全一致 —— 读 Local Storage leveldb 的 mimo.set.avatar key
+    """
+    avatar_id = "avatar-2"  # 默认值
+    try:
+        if os.path.exists(LEVELDB_DIR):
+            for fname in os.listdir(LEVELDB_DIR):
+                if not fname.endswith(".log") and not fname.endswith(".ldb"):
+                    continue
+                fpath = os.path.join(LEVELDB_DIR, fname)
+                try:
+                    with open(fpath, "rb") as f:
+                        raw = f.read()
+                    # 搜索 mimo.set.avatar 键值
+                    marker = b"mimo.set.avatar"
+                    idx = raw.rfind(marker)  # rfind 取最新写入的值
+                    if idx != -1:
+                        chunk = raw[idx: idx + 80]
+                        import re as _re
+                        m = _re.search(rb"avatar-([1-5])", chunk)
+                        if m:
+                            avatar_id = f"avatar-{m.group(1).decode()}"
+                            break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+    fname = AVATAR_FILE_MAP.get(avatar_id, AVATAR_FILE_MAP["avatar-2"])
+    fpath = os.path.join(AVATAR_ASSETS_DIR, fname)
+    if os.path.exists(fpath):
+        with open(fpath, "rb") as f:
+            return f.read()
+
+    # fallback: 旧的 avatar_circle.png
+    if os.path.exists(AVATAR_PNG_PATH):
+        with open(AVATAR_PNG_PATH, "rb") as f:
+            return f.read()
+    return b""
+
+
+def get_weekly_usage() -> Dict[str, Any]:
+    """统计最近7天每日 token 消耗（从 mimocode.db message 表）"""
+    import datetime as _dt
+    from collections import defaultdict as _dd
+
+    now = time.time()
+    week_ago_ms = int((now - 7 * 86400) * 1000)
+    today_str = _dt.datetime.now().strftime("%m-%d")
+
+    day_tokens: Dict[str, int] = _dd(int)
+    day_turns: Dict[str, int] = _dd(int)
+    total_week = 0
+    total_today = 0
+    today_ms = int(_dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+    if not os.path.exists(MIMO_DB_PATH):
+        return {"ok": False, "days": [], "total_week": 0, "total_today": 0}
+
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=3)
+        c = conn.cursor()
+        c.execute("SELECT data FROM message WHERE time_created > ?", (week_ago_ms,))
+        rows = c.fetchall()
+        conn.close()
+
+        for r in rows:
+            try:
+                d = json.loads(r[0])
+                if d.get("role") != "assistant":
+                    continue
+                tok = d.get("tokens", {}) or {}
+                inp = tok.get("input", 0) or 0
+                outp = tok.get("output", 0) or 0
+                cache = tok.get("cache", {}) or {}
+                t = inp + outp + (cache.get("read", 0) or 0) + (cache.get("write", 0) or 0)
+                if t <= 0:
+                    continue
+                tc = (d.get("time") or {}).get("created", 0) or 0
+                dk = _dt.datetime.fromtimestamp(tc / 1000).strftime("%m-%d")
+                day_tokens[dk] += t
+                day_turns[dk] += 1
+                total_week += t
+                if tc >= today_ms:
+                    total_today += t
+            except Exception:
+                continue
+
+        # 构造最近7天的列表（包含无数据的天）
+        days = []
+        for i in range(6, -1, -1):
+            d_str = (_dt.datetime.now() - _dt.timedelta(days=i)).strftime("%m-%d")
+            days.append({
+                "date": d_str,
+                "tokens": day_tokens.get(d_str, 0),
+                "turns": day_turns.get(d_str, 0),
+                "is_today": d_str == today_str,
+            })
+
+        max_tok = max((d["tokens"] for d in days), default=1) or 1
+        for d in days:
+            d["pct"] = round(d["tokens"] / max_tok * 100)
+
+        return {
+            "ok": True,
+            "days": days,
+            "total_week": total_week,
+            "total_today": total_today,
+            "total_week_fmt": format_token_lx(total_week),
+            "total_today_fmt": format_token_lx(total_today),
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "days": [], "total_week": 0, "total_today": 0}
 
 
 def get_user_profile() -> Dict[str, Any]:
@@ -1193,6 +1319,96 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       font-size: 13.5px;
       font-weight: 500;
       color: var(--text-main);
+    }
+
+    /* 头像点击区域 */
+    .sidebar-user-avatar {
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+    }
+    .sidebar-user-avatar:hover {
+      transform: scale(1.08);
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    /* 周用量弹窗 */
+    #weekly-usage-popover {
+      position: fixed;
+      left: 12px;
+      bottom: 72px;
+      width: 252px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.18);
+      padding: 14px 16px 16px;
+      z-index: 9999;
+      display: none;
+    }
+    #weekly-usage-popover.open { display: block; }
+    .weekly-pop-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      letter-spacing: 0.04em;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .weekly-pop-close {
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 14px;
+      line-height: 1;
+      padding: 2px 4px;
+    }
+    .weekly-chart {
+      display: flex;
+      align-items: flex-end;
+      gap: 5px;
+      height: 60px;
+      margin-bottom: 10px;
+    }
+    .weekly-bar-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      height: 100%;
+      justify-content: flex-end;
+    }
+    .weekly-bar {
+      width: 100%;
+      border-radius: 4px 4px 0 0;
+      background: var(--border-subtle);
+      min-height: 3px;
+      transition: height 0.3s ease;
+    }
+    .weekly-bar.today { background: var(--accent); }
+    .weekly-bar.has-data { background: #6B9BF4; }
+    .weekly-bar-label {
+      font-size: 9.5px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .weekly-bar-label.today { color: var(--accent); font-weight: 600; }
+    .weekly-stats {
+      display: flex;
+      justify-content: space-between;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .weekly-stat-item { text-align: center; }
+    .weekly-stat-val {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .weekly-stat-lbl {
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-top: 1px;
     }
 
     /* 消息视窗 */
@@ -2362,8 +2578,30 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
     <!-- 侧边栏底部：继承电脑客户端真实用户头像与昵称 -->
     <div class="sidebar-footer-user">
-      <img src="/icons/avatar.png" class="sidebar-user-avatar" id="user-avatar-img" alt="Avatar">
+      <img src="/icons/avatar.png" class="sidebar-user-avatar" id="user-avatar-img" alt="Avatar"
+           onclick="toggleWeeklyUsage(event)" title="点击查看本周用量">
       <span class="sidebar-user-name" id="user-name-label">Nelson</span>
+    </div>
+  </div>
+
+  <!-- 周用量弹出面板 -->
+  <div id="weekly-usage-popover" onclick="event.stopPropagation()">
+    <div class="weekly-pop-title">
+      <span>📊 近7天 Token 用量</span>
+      <span class="weekly-pop-close" onclick="closeWeeklyUsage()">✕</span>
+    </div>
+    <div class="weekly-chart" id="weekly-chart-bars">
+      <!-- JS 动态渲染 -->
+    </div>
+    <div class="weekly-stats">
+      <div class="weekly-stat-item">
+        <div class="weekly-stat-val" id="weekly-today-val">—</div>
+        <div class="weekly-stat-lbl">今日</div>
+      </div>
+      <div class="weekly-stat-item">
+        <div class="weekly-stat-val" id="weekly-week-val">—</div>
+        <div class="weekly-stat-lbl">本周合计</div>
+      </div>
     </div>
   </div>
 
@@ -2574,6 +2812,65 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     let isVoiceRecording = false;
 
     // ── 上下文用量 HUD (动态扇区环形进度条 + 浮层明细) ──
+    // ── 周用量弹窗 ────────────────────────────────────────────────
+    function closeWeeklyUsage() {
+      document.getElementById("weekly-usage-popover").classList.remove("open");
+    }
+
+    async function toggleWeeklyUsage(e) {
+      if (e) e.stopPropagation();
+      const pop = document.getElementById("weekly-usage-popover");
+      if (pop.classList.contains("open")) {
+        pop.classList.remove("open");
+        return;
+      }
+      // 关闭其他弹窗
+      closeModelMenu();
+      const ctxPop = document.getElementById("ctx-hud-popover");
+      if (ctxPop) ctxPop.style.display = "none";
+
+      pop.classList.add("open");
+      // 加载数据
+      try {
+        const r = await fetch("/api/weekly-usage");
+        const data = await r.json();
+        if (data.ok) renderWeeklyChart(data);
+      } catch(err) {}
+    }
+
+    function renderWeeklyChart(data) {
+      const bars = document.getElementById("weekly-chart-bars");
+      if (!bars) return;
+      bars.innerHTML = data.days.map(d => {
+        const h = Math.max(3, Math.round(d.pct * 0.57));  // max 57px
+        const cls = d.is_today ? "today" : (d.tokens > 0 ? "has-data" : "");
+        const lblCls = d.is_today ? "today" : "";
+        const tip = d.tokens > 0 ? formatTokLocal(d.tokens) : "0";
+        return `<div class="weekly-bar-wrap" title="${d.date}: ${tip}">
+          <div class="weekly-bar ${cls}" style="height:${h}px"></div>
+          <div class="weekly-bar-label ${lblCls}">${d.date.replace(/^0/,"")}</div>
+        </div>`;
+      }).join("");
+
+      document.getElementById("weekly-today-val").textContent = formatTokLocal(data.total_today);
+      document.getElementById("weekly-week-val").textContent = formatTokLocal(data.total_week);
+    }
+
+    function formatTokLocal(n) {
+      if (!n) return "0";
+      if (n >= 1000000) return (n/1000000).toFixed(1) + "M";
+      if (n >= 1000) return (n/1000).toFixed(1) + "K";
+      return String(n);
+    }
+
+    // 点击页面其他区域关闭弹窗
+    document.addEventListener("click", function(e) {
+      const pop = document.getElementById("weekly-usage-popover");
+      if (pop && pop.classList.contains("open") && !pop.contains(e.target)) {
+        pop.classList.remove("open");
+      }
+    });
+
     function toggleContextHud(e) {
       if (e) e.stopPropagation();
       const popover = document.getElementById("ctx-hud-popover");
@@ -4035,14 +4332,15 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             self.wfile.write(ICON_512_PNG)
             return
 
-        # 5. 客户端真实用户头像
+        # 5. 客户端真实用户头像（动态联动 app 端 mimo.set.avatar 设置）
         elif path == "/icons/avatar.png":
+            avatar_bytes = get_desktop_avatar_png()
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
-            self.send_header("Content-Length", str(len(USER_AVATAR_PNG)))
-            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(avatar_bytes)))
+            self.send_header("Cache-Control", "no-cache")  # 动态联动，不缓存
             self.end_headers()
-            self.wfile.write(USER_AVATAR_PNG)
+            self.wfile.write(avatar_bytes)
             return
 
         # 6. 用户信息 API
@@ -4162,6 +4460,11 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             sid = query.get("sessionId", [""])[0] or None
             res = get_context_usage(sid)
             self.send_json(200, res)
+            return
+
+        # 周用量统计
+        elif path == "/api/weekly-usage":
+            self.send_json(200, get_weekly_usage())
             return
 
         # 13. 插件与技能中心列表 API
