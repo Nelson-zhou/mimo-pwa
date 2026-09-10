@@ -24,6 +24,10 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import base64
+import tempfile
+import uuid
+import mimetypes
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional, Tuple
 import zlib
@@ -64,6 +68,174 @@ def get_current_model() -> str:
             pass
     return "mimo-auto"
 
+
+
+UPLOAD_DIR = os.path.join(tempfile.gettempdir(), "mimo-uploads")
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+MIME_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def get_current_perm() -> str:
+    """读取当前在 preferences.json 中保存的权限配置"""
+    if os.path.exists(PREFERENCES_PATH):
+        try:
+            with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
+                p = json.load(f)
+                return p.get("perm", "完全访问权限")
+        except Exception:
+            pass
+    return "完全访问权限"
+
+
+def set_current_perm(perm_value: str, session_id: Optional[str] = None) -> bool:
+    """修改 preferences.json 中的权限并持久化到本地桌面应用配置中"""
+    if perm_value not in ("完全访问权限", "帮我审批", "默认权限"):
+        return False
+    if os.path.exists(PREFERENCES_PATH):
+        try:
+            with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
+                p = json.load(f)
+            p["perm"] = perm_value
+            if session_id:
+                if "permByConvo" not in p or not isinstance(p["permByConvo"], dict):
+                    p["permByConvo"] = {}
+                p["permByConvo"][session_id] = perm_value
+            with open(PREFERENCES_PATH, "w", encoding="utf-8") as f:
+                json.dump(p, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception as e:
+            print("Error updating preferences.json perm:", e)
+            return False
+    return False
+
+
+def categorize_artifact(ext: str) -> Tuple[str, str]:
+    """根据后缀返回分类 (doc, app, other) 与徽章名称"""
+    if ext in (".docx", ".doc"):
+        return "doc", "Word"
+    elif ext in (".pptx", ".ppt"):
+        return "doc", "PPT"
+    elif ext in (".xlsx", ".xls", ".csv"):
+        return "doc", "Excel"
+    elif ext == ".pdf":
+        return "doc", "PDF"
+    elif ext in (".txt", ".md", ".markdown"):
+        return "doc", "文本"
+    elif ext in (".html", ".htm"):
+        return "app", "落地页"
+    elif ext in (".py", ".js", ".ts", ".jsx", ".tsx", ".sh", ".json"):
+        return "app", "代码应用"
+    elif ext in (".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif"):
+        return "other", "图片"
+    else:
+        return "other", "文件"
+
+
+def get_all_artifacts() -> list:
+    """汇总检索 Xiaomi MiMo 在本地产生的所有产物 (SQLite present_files + XiaomiMiMoProjects)"""
+    results = []
+    seen_paths = set()
+
+    # 1. 从 mimocode.db 的 present_files 工具调用中提取
+    if os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=3)
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT p.session_id, s.title, p.time_created, p.data 
+                FROM part p 
+                LEFT JOIN session s ON p.session_id = s.id 
+                WHERE p.data LIKE ? 
+                ORDER BY p.time_created DESC LIMIT 100
+                """,
+                ("%\"tool\":\"present_files\"%",),
+            )
+            for sid, stitle, tcreate, data_str in c.fetchall():
+                try:
+                    data = json.loads(data_str)
+                    inp = data.get("state", {}).get("input", {})
+                    files = inp.get("files", [])
+                    exp = inp.get("explanation", "")
+                    for fp in files:
+                        if not fp or fp in seen_paths:
+                            continue
+                        seen_paths.add(fp)
+                        fname = os.path.basename(fp)
+                        ext = os.path.splitext(fname)[1].lower()
+                        cat, badge = categorize_artifact(ext)
+                        exists = os.path.exists(fp)
+                        size = os.path.getsize(fp) if exists else 0
+                        results.append({
+                            "path": fp,
+                            "name": fname,
+                            "title": exp or fname,
+                            "ext": ext,
+                            "category": cat,
+                            "badge": badge,
+                            "sessionId": sid or "",
+                            "sessionTitle": stitle or "对话任务",
+                            "timeCreated": tcreate,
+                            "size": size,
+                            "exists": exists,
+                        })
+                except Exception:
+                    pass
+            conn.close()
+        except Exception as e:
+            print("Error query artifacts DB:", e)
+
+    # 2. 扫描用户 XiaomiMiMoProjects 目录
+    proj_dir = os.path.expanduser("~/XiaomiMiMoProjects")
+    if os.path.exists(proj_dir):
+        try:
+            for root, _, files in os.walk(proj_dir):
+                for f in files:
+                    if f.startswith(".") or f.endswith((".DS_Store", ".tmp", ".log")):
+                        continue
+                    fp = os.path.join(root, f)
+                    if fp not in seen_paths:
+                        seen_paths.add(fp)
+                        ext = os.path.splitext(f)[1].lower()
+                        cat, badge = categorize_artifact(ext)
+                        stat = os.stat(fp)
+                        results.append({
+                            "path": fp,
+                            "name": f,
+                            "title": f,
+                            "ext": ext,
+                            "category": cat,
+                            "badge": badge,
+                            "sessionId": "",
+                            "sessionTitle": "本地产物项目",
+                            "timeCreated": int(stat.st_mtime * 1000),
+                            "size": stat.st_size,
+                            "exists": True,
+                        })
+        except Exception as e:
+            print("Error scan XiaomiMiMoProjects:", e)
+
+    results.sort(key=lambda x: x.get("timeCreated", 0), reverse=True)
+    return results
 
 def set_current_model(model_id: str) -> bool:
     """修改 preferences.json 中的模型并持久化到本地桌面应用配置中"""
@@ -1075,6 +1247,184 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       user-select: none;
     }
 
+    
+    /* 附件预览行 */
+    .attached-files-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 8px 12px 2px;
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .attached-file-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #F3F4F6;
+      border: 1px solid #E5E7EB;
+      border-radius: 8px;
+      padding: 3px 8px;
+      font-size: 11.5px;
+      color: var(--text-main);
+      max-width: 220px;
+    }
+    .attached-file-chip span {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .attached-file-thumb {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      object-fit: cover;
+    }
+    .attached-file-del {
+      cursor: pointer;
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-left: 2px;
+      font-weight: bold;
+    }
+    .attached-file-del:hover {
+      color: #EF4444;
+    }
+
+    /* 权限徽章色彩状态 */
+    .dock-perm-badge.amber {
+      color: #D97706 !important;
+      background: rgba(217, 119, 6, 0.08) !important;
+    }
+    .dock-perm-badge.blue {
+      color: #2563EB !important;
+      background: rgba(37, 99, 235, 0.08) !important;
+    }
+    .dock-perm-badge.gray {
+      color: #4B5563 !important;
+      background: rgba(107, 114, 128, 0.08) !important;
+    }
+
+    /* 产物中心模态窗样式 */
+    .artifacts-box {
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      border-radius: 20px 20px 0 0;
+      padding: 20px 18px 24px;
+    }
+    .artifact-tabs {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+      overflow-x: auto;
+    }
+    .artifact-tab {
+      padding: 5px 14px;
+      border-radius: 20px;
+      border: 1px solid #E5E7EB;
+      background: #F9FAFB;
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .artifact-tab.active {
+      background: #111827;
+      color: #FFFFFF;
+      border-color: #111827;
+      font-weight: 600;
+    }
+    .artifact-search-box {
+      margin-bottom: 12px;
+    }
+    .artifact-search-box input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid #E5E7EB;
+      background: #F9FAFB;
+      font-size: 12.5px;
+      outline: none;
+    }
+    .artifacts-scroll-list {
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-bottom: 12px;
+    }
+    .artifact-card {
+      background: #FFFFFF;
+      border: 1px solid #E5E7EB;
+      border-radius: 12px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .artifact-card:hover {
+      border-color: #D1D5DB;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.03);
+    }
+    .artifact-card-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .artifact-card-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      line-height: 1.35;
+    }
+    .artifact-badge {
+      padding: 2px 7px;
+      border-radius: 6px;
+      font-size: 10.5px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+    .badge-doc { background: #EFF6FF; color: #2563EB; }
+    .badge-app { background: #FFF7ED; color: #EA580C; }
+    .badge-other { background: #F3F4F6; color: #4B5563; }
+    .artifact-card-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .artifact-card-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 6px;
+      border-top: 1px solid #F3F4F6;
+    }
+    .btn-artifact-action {
+      padding: 4px 10px;
+      border-radius: 7px;
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid #E5E7EB;
+      background: #FFFFFF;
+      color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      text-decoration: none;
+    }
+    .btn-artifact-action.primary {
+      background: var(--mimo-orange);
+      color: #FFFFFF;
+      border-color: var(--mimo-orange);
+    }
+
     /* 模型弹窗 */
     .modal-sheet {
       position: fixed;
@@ -1232,7 +1582,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>
         <span>插件</span>
       </div>
-      <div class="sidebar-action-btn" onclick="alert('产物保存在当前项目目录中')">
+      <div class="sidebar-action-btn" onclick="openArtifactsModal()">
         <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
         <span>产物中心</span>
       </div>
@@ -1263,17 +1613,19 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
   <!-- 1:1 官方浮岛式输入框 (带 完全访问 / MiMo Auto / AI免责声明) -->
   <footer>
     <div class="floating-mimo-island">
+      <div class="attached-files-row" id="attached-files-row" style="display:none;"></div>
       <textarea id="dock-input" rows="1" placeholder="描述任务，输入/调用技能" oninput="autoGrow(this)"></textarea>
+      <input type="file" id="dock-file-input" multiple accept="image/*,.pdf,.txt,.md,.py,.js,.html,.json,.docx,.xlsx,.pptx" style="display:none;" onchange="handleFileInputChange(event)">
       
       <div class="dock-controls-bar">
         <div class="dock-left-group">
-          <button class="btn-dock-icon" title="添加附件/技能" onclick="triggerNewSession()">
+          <button class="btn-dock-icon" title="添加图片或文件" onclick="document.getElementById('dock-file-input').click()">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
           
-          <div class="dock-perm-badge" title="最高权限自动执行" onclick="alert('已启用「完全访问」权限，MiMo 将自动执行代码工具，无需人工审批')">
+          <div class="dock-perm-badge amber" id="dock-perm-btn" title="切换审批权限" onclick="togglePermSheet(true)">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span>完全访问 ▾</span>
+            <span id="perm-name-label">完全访问 ▾</span>
           </div>
         </div>
 
@@ -1298,6 +1650,47 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <div class="dock-disclaimer">内容由 AI 生成，请注意核实</div>
   </footer>
 
+  
+  <!-- 权限选择弹层 (对接 preferences.json 真实权限模式) -->
+  <div class="modal-sheet" id="perm-sheet" onclick="togglePermSheet(false)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-title">
+        <span>切换审批权限</span>
+        <button class="btn-icon" onclick="togglePermSheet(false)">✕</button>
+      </div>
+      <div id="perm-sheet-list" style="display:flex; flex-direction:column; gap:8px;">
+        <div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px;">正在同步权限列表...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 产物中心模态窗 (完整汇总预览下载) -->
+  <div class="modal-sheet" id="artifacts-sheet" onclick="toggleArtifactsSheet(false)">
+    <div class="modal-box artifacts-box" onclick="event.stopPropagation()">
+      <div class="modal-title">
+        <div>
+          <span style="font-size:16px; font-weight:700;">产物中心</span>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px; font-weight:normal;">
+            这里汇总了你在 Xiaomi MiMo 里生成过的全部产物，可预览、下载或回到对话继续
+          </div>
+        </div>
+        <button class="btn-icon" onclick="toggleArtifactsSheet(false)">✕</button>
+      </div>
+      <div class="artifact-tabs">
+        <button class="artifact-tab active" data-cat="all" onclick="filterArtifacts('all', this)">全部</button>
+        <button class="artifact-tab" data-cat="doc" onclick="filterArtifacts('doc', this)">文档</button>
+        <button class="artifact-tab" data-cat="app" onclick="filterArtifacts('app', this)">应用</button>
+        <button class="artifact-tab" data-cat="other" onclick="filterArtifacts('other', this)">其他</button>
+      </div>
+      <div class="artifact-search-box">
+        <input type="text" id="artifact-search-input" placeholder="搜索产物名称或标题..." oninput="onSearchArtifacts(this.value)">
+      </div>
+      <div class="artifacts-scroll-list" id="artifacts-scroll-list">
+        <div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">正在加载产物列表...</div>
+      </div>
+    </div>
+  </div>
+
   <!-- 真实模型选择弹层 (对接电脑端 preferences.json 真实配置) -->
   <div class="modal-sheet" id="model-sheet" onclick="toggleModelSheet(false)">
     <div class="modal-box" onclick="event.stopPropagation()">
@@ -1316,12 +1709,277 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     let currentSessionId = "";
     let selectedModelId = "mimo-auto";
     let selectedModelName = "MiMo Auto";
+    let selectedPerm = "完全访问权限";
+    let selectedPermName = "完全访问";
+    let attachedFiles = [];
+    let allArtifacts = [];
+    let currentArtifactTab = "all";
     let isBusy = false;
     let activeSseSource = null;
     let activeToolsMap = {};
     let activeAssistantBox = null;
     let activeProseCard = null;
     let busyPollTimer = null;
+
+    
+    // ── 审批权限切换逻辑 ──
+    async function loadPermConfig() {
+      try {
+        const r = await fetch("/api/perm");
+        const data = await r.json();
+        if (data && data.options) {
+          selectedPerm = data.current || "完全访问权限";
+          renderPermList(data.options);
+          updatePermBadge(selectedPerm, data.options);
+        }
+      } catch (e) {}
+    }
+
+    function updatePermBadge(permId, options) {
+      const opt = (options || []).find(o => o.id === permId);
+      selectedPermName = opt ? opt.name : (permId === "完全访问权限" ? "完全访问" : permId);
+      const label = document.getElementById("perm-name-label");
+      const btn = document.getElementById("dock-perm-btn");
+      if (label) label.textContent = selectedPermName + " ▾";
+      if (btn) {
+        btn.classList.remove("amber", "blue", "gray");
+        if (permId === "完全访问权限") btn.classList.add("amber");
+        else if (permId === "帮我审批") btn.classList.add("blue");
+        else btn.classList.add("gray");
+      }
+    }
+
+    function renderPermList(options) {
+      const container = document.getElementById("perm-sheet-list");
+      if (!container) return;
+      container.innerHTML = options.map(opt => `
+        <div class="model-item ${opt.id === selectedPerm ? "selected" : ""}" onclick="selectPerm('${opt.id}', '${opt.name}')">
+          <div>
+            <div class="model-item-name" style="display:flex; align-items:center; gap:8px;">
+              <span>${opt.name}</span>
+              <span class="artifact-badge ${opt.badgeClass || "badge-other"}">${opt.badge}</span>
+            </div>
+            <div class="model-item-desc">${opt.desc}</div>
+          </div>
+          ${opt.id === selectedPerm ? "<span style='color:#16A34A; font-weight:700;'>✓</span>" : ""}
+        </div>
+      `).join("");
+    }
+
+    function togglePermSheet(open) {
+      const sheet = document.getElementById("perm-sheet");
+      if (sheet) {
+        if (open) {
+          loadPermConfig();
+          sheet.classList.add("open");
+        } else {
+          sheet.classList.remove("open");
+        }
+      }
+    }
+
+    async function selectPerm(permId, permName) {
+      selectedPerm = permId;
+      selectedPermName = permName;
+      updatePermBadge(permId);
+      togglePermSheet(false);
+      try {
+        await fetch("/api/perm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ perm: permId, session_id: currentSessionId })
+        });
+      } catch (e) {}
+    }
+
+    // ── 附件与图片上传逻辑 ──
+    async function handleFileInputChange(e) {
+      const files = e.target.files;
+      if (!files || !files.length) return;
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        await uploadSingleFile(f);
+      }
+      e.target.value = "";
+    }
+
+    function uploadSingleFile(file) {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          const b64 = reader.result.split(",")[1];
+          try {
+            const r = await fetch("/api/upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ filename: file.name, content: b64, type: file.type })
+            });
+            const res = await r.json();
+            if (res.ok) {
+              attachedFiles.push({
+                name: file.name,
+                path: res.path,
+                type: file.type,
+                size: file.size,
+                dataUrl: file.type.startsWith("image/") ? reader.result : null
+              });
+              renderAttachedFiles();
+            } else {
+              alert("文件上传失败: " + (res.error || "未知错误"));
+            }
+          } catch (err) {
+            alert("上传异常: " + err.message);
+          }
+          resolve();
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+
+    function renderAttachedFiles() {
+      const row = document.getElementById("attached-files-row");
+      if (!row) return;
+      if (!attachedFiles.length) {
+        row.style.display = "none";
+        row.innerHTML = "";
+        return;
+      }
+      row.style.display = "flex";
+      row.innerHTML = attachedFiles.map((f, idx) => `
+        <div class="attached-file-chip">
+          ${f.dataUrl ? `<img src="${f.dataUrl}" class="attached-file-thumb">` : `<span style="font-size:14px;">📄</span>`}
+          <span title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+          <span class="attached-file-del" onclick="removeAttachedFile(${idx})">✕</span>
+        </div>
+      `).join("");
+    }
+
+    function removeAttachedFile(idx) {
+      attachedFiles.splice(idx, 1);
+      renderAttachedFiles();
+    }
+
+    // ── 产物中心逻辑 ──
+    function openArtifactsModal() {
+      toggleDrawer(false);
+      toggleArtifactsSheet(true);
+    }
+
+    function toggleArtifactsSheet(open) {
+      const sheet = document.getElementById("artifacts-sheet");
+      if (sheet) {
+        if (open) {
+          loadArtifactsList();
+          sheet.classList.add("open");
+        } else {
+          sheet.classList.remove("open");
+        }
+      }
+    }
+
+    async function loadArtifactsList() {
+      const list = document.getElementById("artifacts-scroll-list");
+      if (list) list.innerHTML = `<div style="padding:24px; text-align:center; color:var(--text-muted); font-size:13px;">正在同步全部产物索引...</div>`;
+      try {
+        const r = await fetch("/api/artifacts");
+        const data = await r.json();
+        allArtifacts = data.artifacts || [];
+        renderArtifacts(allArtifacts);
+      } catch (e) {
+        if (list) list.innerHTML = `<div style="padding:24px; text-align:center; color:#EF4444; font-size:13px;">产物加载失败: ${e.message}</div>`;
+      }
+    }
+
+    function filterArtifacts(cat, btn) {
+      currentArtifactTab = cat;
+      const tabs = document.querySelectorAll(".artifact-tab");
+      tabs.forEach(t => t.classList.remove("active"));
+      if (btn) btn.classList.add("active");
+      applyArtifactFilters();
+    }
+
+    function onSearchArtifacts() {
+      applyArtifactFilters();
+    }
+
+    function applyArtifactFilters() {
+      const keyword = (document.getElementById("artifact-search-input")?.value || "").toLowerCase().trim();
+      let filtered = allArtifacts;
+      if (currentArtifactTab !== "all") {
+        filtered = filtered.filter(a => a.category === currentArtifactTab);
+      }
+      if (keyword) {
+        filtered = filtered.filter(a =>
+          (a.title && a.title.toLowerCase().includes(keyword)) ||
+          (a.name && a.name.toLowerCase().includes(keyword)) ||
+          (a.sessionTitle && a.sessionTitle.toLowerCase().includes(keyword))
+        );
+      }
+      renderArtifacts(filtered);
+    }
+
+    function renderArtifacts(items) {
+      const container = document.getElementById("artifacts-scroll-list");
+      if (!container) return;
+      if (!items || !items.length) {
+        container.innerHTML = `
+          <div style="padding:48px 16px; text-align:center; color:var(--text-muted);">
+            <div style="font-size:32px; margin-bottom:8px;">📦</div>
+            <div style="font-size:13px; font-weight:500;">还没有匹配的产物</div>
+            <div style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">在对话中让 MiMo 生成页面、文档或代码后将在这里汇总</div>
+          </div>
+        `;
+        return;
+      }
+      container.innerHTML = items.map(item => {
+        const sizeStr = item.size > 1024 * 1024 ? (item.size / (1024 * 1024)).toFixed(1) + " MB" : Math.round(item.size / 1024) + " KB";
+        const dateStr = item.timeCreated ? new Date(item.timeCreated).toLocaleDateString() + " " + new Date(item.timeCreated).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}) : "";
+        const badgeCls = item.category === "doc" ? "badge-doc" : (item.category === "app" ? "badge-app" : "badge-other");
+        const isHtml = item.ext === ".html" || item.ext === ".htm";
+        const isImage = [".png", ".jpg", ".jpeg", ".webp", ".svg"].includes(item.ext);
+        const canPreview = isHtml || isImage || item.ext === ".pdf" || item.ext === ".txt";
+
+        return `
+          <div class="artifact-card">
+            <div class="artifact-card-top">
+              <div>
+                <div class="artifact-card-title">${escapeHtml(item.title || item.name)}</div>
+                <div style="font-size:12px; color:var(--text-dim); margin-top:2px;">${escapeHtml(item.name)}</div>
+              </div>
+              <span class="artifact-badge ${badgeCls}">${item.badge || "文件"}</span>
+            </div>
+            <div class="artifact-card-meta">
+              <span>📅 ${dateStr}</span>
+              <span>💾 ${sizeStr}</span>
+              ${item.sessionTitle ? `<span>💬 ${escapeHtml(item.sessionTitle)}</span>` : ""}
+            </div>
+            <div class="artifact-card-actions">
+              ${canPreview ? `<button class="btn-artifact-action primary" onclick="openArtifactPreview('${encodeURIComponent(item.path)}')">👁️ 打开预览</button>` : ""}
+              <button class="btn-artifact-action" onclick="downloadArtifact('${encodeURIComponent(item.path)}')">📥 下载</button>
+              ${item.sessionId ? `<button class="btn-artifact-action" onclick="jumpToArtifactSession('${item.sessionId}')">💬 进入对话</button>` : ""}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    function openArtifactPreview(encodedPath) {
+      window.open("/api/artifacts/file?path=" + encodedPath, "_blank");
+    }
+
+    function downloadArtifact(encodedPath) {
+      const a = document.createElement("a");
+      a.href = "/api/artifacts/file?download=1&path=" + encodedPath;
+      a.target = "_blank";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
+
+    function jumpToArtifactSession(sid) {
+      toggleArtifactsSheet(false);
+      selectSession(sid);
+    }
 
     // 1. PWA Service Worker 注册与 Android / Chrome 原生安装事件捕获
     let deferredPrompt = null;
@@ -1715,11 +2373,20 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       }
     }
 
-    function appendUserBubble(text) {
+    function appendUserBubble(text, files) {
       const vp = document.getElementById("chat-viewport");
       const row = document.createElement("div");
       row.className = "msg-user-container";
-      row.innerHTML = `<div class="user-bubble">${formatCodeBlocks(text)}</div>`;
+      let filesHtml = "";
+      if (files && files.length) {
+        filesHtml = '<div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;">' + files.map(f => {
+          if (f.dataUrl && f.type && f.type.startsWith("image/")) {
+            return `<img src="${f.dataUrl}" style="max-width:140px; max-height:140px; border-radius:8px; object-fit:cover; display:block;">`;
+          }
+          return `<div style="padding:4px 8px; background:rgba(0,0,0,0.06); border-radius:6px; font-size:11.5px; display:inline-flex; align-items:center; gap:4px;">📄 ${escapeHtml(f.name)}</div>`;
+        }).join("") + '</div>';
+      }
+      row.innerHTML = `<div class="user-bubble">${filesHtml}${formatCodeBlocks(text)}</div>`;
       vp.appendChild(row);
       vp.scrollTop = vp.scrollHeight;
     }
@@ -1859,16 +2526,21 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     async function sendPrompt() {
       const input = document.getElementById("dock-input");
       const text = input.value.trim();
-      if (!text || isBusy) return;
+      if ((!text && !attachedFiles.length) || isBusy) return;
 
       if (navigator.vibrate) navigator.vibrate(12);
 
       const topTitle = document.getElementById("top-session-title");
       if (topTitle && (topTitle.textContent === "新任务会话" || topTitle.textContent === "当前任务")) {
-        topTitle.textContent = text.slice(0, 24);
+        topTitle.textContent = (text || "附件任务").slice(0, 24);
       }
 
-      appendUserBubble(text);
+      const sendingFiles = attachedFiles.slice();
+      appendUserBubble(text || "请查看所附文件/图片", sendingFiles);
+      const filePaths = sendingFiles.map(f => f.path);
+      attachedFiles = [];
+      renderAttachedFiles();
+
       input.value = "";
       input.style.height = "auto";
       setBusy(true);
@@ -1882,7 +2554,13 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         const r = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: text, session_id: currentSessionId, model: selectedModelId })
+          body: JSON.stringify({
+            message: text || "请查看所附文件/图片",
+            session_id: currentSessionId,
+            model: selectedModelId,
+            perm: selectedPerm,
+            files: filePaths
+          })
         });
         const res = await r.json();
         if (!r.ok) {
@@ -1957,6 +2635,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       // 1. 并行同步用户资料、模型配置与会话列表
       loadUserProfile();
       loadModelConfig();
+      loadPermConfig();
       loadSessionsList();
 
       // 2. 安全超时兜底：若 3.5 秒内未同步成功，自动解除加载状态，防止卡死
@@ -2137,6 +2816,88 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             ]
             self.send_json(200, {"current": cur, "models": models_info})
             return
+        # 8. 审批权限配置 API
+        elif path == "/api/perm":
+            current_perm = get_current_perm()
+            perm_options = [
+                {
+                    "id": "完全访问权限",
+                    "name": "完全访问",
+                    "badge": "推荐远程使用",
+                    "badgeClass": "badge-amber",
+                    "desc": "无需批准即可编辑工作区外文件、运行联网命令，跳过所有权限确认，有安全风险，请谨慎开启",
+                },
+                {
+                    "id": "帮我审批",
+                    "name": "帮我审批",
+                    "badge": "智能代审",
+                    "badgeClass": "badge-blue",
+                    "desc": "在本项目内创建、修改、删除文件无需确认；项目外文件访问与常规命令直接放行；危险命令由模型代审",
+                },
+                {
+                    "id": "默认权限",
+                    "name": "默认权限",
+                    "badge": "手动确认",
+                    "badgeClass": "badge-gray",
+                    "desc": "读取工作区内文件无需确认；创建、修改文件或执行命令等操作会先弹卡片请你确认",
+                },
+            ]
+            self.send_json(200, {"current": current_perm, "options": perm_options})
+            return
+
+        # 9. 获取上传的文件内容 (图片预览/下载)
+        elif path == "/api/upload/file":
+            filepath = query.get("path", [""])[0]
+            if not filepath or not os.path.exists(filepath):
+                self.send_json(404, {"error": "文件不存在"})
+                return
+            ext = os.path.splitext(filepath)[1].lower()
+            mime = MIME_TYPES.get(ext, "application/octet-stream")
+            try:
+                with open(filepath, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+            return
+
+        # 10. 产物中心列表 API
+        elif path == "/api/artifacts":
+            cat = query.get("category", ["all"])[0]
+            items = get_all_artifacts()
+            if cat and cat != "all":
+                items = [it for it in items if it.get("category") == cat]
+            self.send_json(200, {"ok": True, "artifacts": items})
+            return
+
+        # 11. 产物文件直出/预览/下载
+        elif path == "/api/artifacts/file":
+            filepath = query.get("path", [""])[0]
+            download = query.get("download", ["0"])[0] == "1"
+            if not filepath or not os.path.exists(filepath):
+                self.send_json(404, {"error": "产物文件不存在"})
+                return
+            ext = os.path.splitext(filepath)[1].lower()
+            mime = MIME_TYPES.get(ext, "application/octet-stream")
+            try:
+                with open(filepath, "rb") as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(data)))
+                if download:
+                    fname = os.path.basename(filepath)
+                    self.send_header("Content-Disposition", f'attachment; filename="{urllib.parse.quote(fname)}"')
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+            return
+
 
         # 7. 获取电脑当前正在焦点的最新会话
         elif path == "/api/active_session":
@@ -2280,15 +3041,21 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            perm = payload.get("perm") or get_current_perm()
+            files = payload.get("files", [])
+            req_body = {
+                "message": msg,
+                "model": model,
+                "perm": perm,
+                "dir": os.path.expanduser("~"),
+            }
+            if isinstance(files, list) and files:
+                req_body["files"] = [f for f in files if isinstance(f, str) and f]
+
             code, res = call_mimo_v1(
                 f"sessions/{sid}/turns",
                 method="POST",
-                body={
-                    "message": msg,
-                    "model": model,
-                    "perm": "完全访问权限",
-                    "dir": os.path.expanduser("~"),
-                },
+                body=req_body,
             )
             self.send_json(code, res)
             return
@@ -2302,6 +3069,42 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             else:
                 self.send_json(400, {"error": "不支持的模型 ID"})
             return
+        # 3. 权限切换 API
+        elif path == "/api/perm":
+            target = payload.get("perm", "完全访问权限").strip()
+            sid = payload.get("session_id")
+            if target in ("完全访问权限", "帮我审批", "默认权限"):
+                ok = set_current_perm(target, session_id=sid)
+                self.send_json(200, {"ok": ok, "current": target})
+            else:
+                self.send_json(400, {"error": "不支持的权限类别"})
+            return
+
+        # 4. 文件/图片上传 API
+        elif path == "/api/upload":
+            filename = payload.get("filename", "file.bin")
+            content_b64 = payload.get("content", "")
+            if not content_b64:
+                self.send_json(400, {"error": "缺少文件内容"})
+                return
+            try:
+                raw = base64.b64decode(content_b64)
+                safe_name = re.sub(r"[^a-zA-Z0-9_一-龥\.\-]", "_", os.path.basename(filename))
+                saved_id = uuid.uuid4().hex[:12]
+                saved_path = os.path.join(UPLOAD_DIR, f"{saved_id}_{safe_name}")
+                with open(saved_path, "wb") as f:
+                    f.write(raw)
+                self.send_json(200, {
+                    "ok": True,
+                    "path": saved_path,
+                    "name": filename,
+                    "size": len(raw),
+                    "url": f"/api/upload/file?path={urllib.parse.quote(saved_path)}"
+                })
+            except Exception as e:
+                self.send_json(500, {"error": str(e)})
+            return
+
 
         # 4. 中止当前任务
         elif path == "/api/abort":
