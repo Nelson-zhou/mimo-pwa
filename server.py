@@ -24,6 +24,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+import traceback
 import base64
 import tempfile
 import uuid
@@ -4293,7 +4294,13 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             files: filePaths
           })
         });
-        const res = await r.json();
+        const respText = await r.text();
+        let res = {};
+        try {
+          res = JSON.parse(respText);
+        } catch (_) {
+          res = { error: respText || "服务器返回了空内容" };
+        }
         if (!r.ok) {
           stopBusyWatch();
           activeProseCard.innerHTML = "❌ 调度出错: " + (res.error || "未知错误");
@@ -4826,139 +4833,145 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
         self.send_json(404, {"error": "Not Found"})
 
     def do_POST(self):
-        parsed = urllib.parse.urlsplit(self.path)
-        path = parsed.path
-        length = int(self.headers.get("Content-Length", 0))
-        body_bytes = self.rfile.read(length) if length > 0 else b"{}"
         try:
-            payload = json.loads(body_bytes.decode("utf-8"))
-        except Exception:
-            payload = {}
-
-        # 1. 新建会话
-        if path in ("/api/sessions/create", "/api/sessions"):
-            title = payload.get("title", "新任务会话")
-            sess = create_new_mimo_session_in_db(title=title)
-            self.send_json(200, sess)
-            return
-
-        # 2. 发送任务消息 (携带真实 model 参数 & 完全访问权限自动批准 & 工作目录)
-        elif path == "/api/chat":
-            msg = payload.get("message", "").strip()
-            model = payload.get("model") or get_current_model()
-            valid_models = ("mimo-auto", "mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview")
-            if model not in valid_models:
-                model = "mimo-auto"
-
-            if not msg or not sid:
-                self.send_json(400, {"error": "缺少 message 或 session_id"})
-                return
-
-            # 查询此 session 的真实工作目录 directory 与更新标题
-            directory = "/Users/zhouzheng"
-            if os.path.exists(MIMO_DB_PATH):
-                try:
-                    conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
-                    c = conn.cursor()
-                    c.execute("SELECT directory, title FROM session WHERE id = ?", (sid,))
-                    row = c.fetchone()
-                    if row:
-                        if row[0]:
-                            directory = row[0]
-                        if not row[1] or row[1] in ("新任务会话", "新建任务会话", "未命名任务"):
-                            new_title = msg.replace("\n", " ")[:32].strip()
-                            c.execute("UPDATE session SET title = ? WHERE id = ?", (new_title, sid))
-                            conn.commit()
-                    conn.close()
-                except Exception:
-                    pass
-
-            perm = payload.get("perm") or get_current_perm()
-            files = payload.get("files", [])
-            req_body = {
-                "message": msg,
-                "model": model,
-                "perm": perm,
-                "dir": directory,
-            }
-            if isinstance(files, list) and files:
-                req_body["files"] = [f for f in files if isinstance(f, str) and f]
-
-            code, res = call_mimo_v1(
-                f"sessions/{sid}/turns",
-                method="POST",
-                body=req_body,
-            )
-            self.send_json(code, res)
-            return
-
-        # 3. 真实模型切换与 preferences.json 同步持久化
-        elif path == "/api/model":
-            target = payload.get("model", "mimo-auto").strip()
-            valid_models = ("mimo-auto", "mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview")
-            if target in valid_models:
-                ok = set_current_model(target)
-                self.send_json(200, {"ok": ok, "current": target})
-            else:
-                self.send_json(400, {"error": "不支持的模型 ID"})
-            return
-        # 3. 权限切换 API
-        elif path == "/api/perm":
-            target = payload.get("perm", "完全访问权限").strip()
-            sid = payload.get("session_id")
-            if target in ("完全访问权限", "帮我审批", "默认权限"):
-                ok = set_current_perm(target, session_id=sid)
-                self.send_json(200, {"ok": ok, "current": target})
-            else:
-                self.send_json(400, {"error": "不支持的权限类别"})
-            return
-
-        # 4. 文件/图片上传 API
-        elif path == "/api/upload":
-            filename = payload.get("filename", "file.bin")
-            content_b64 = payload.get("content", "")
-            if not content_b64:
-                self.send_json(400, {"error": "缺少文件内容"})
-                return
+            parsed = urllib.parse.urlsplit(self.path)
+            path = parsed.path
+            length = int(self.headers.get("Content-Length", 0))
+            body_bytes = self.rfile.read(length) if length > 0 else b"{}"
             try:
-                raw = base64.b64decode(content_b64)
-                safe_name = re.sub(r"[^a-zA-Z0-9_一-龥\.\-]", "_", os.path.basename(filename))
-                saved_id = uuid.uuid4().hex[:12]
-                saved_path = os.path.join(UPLOAD_DIR, f"{saved_id}_{safe_name}")
-                with open(saved_path, "wb") as f:
-                    f.write(raw)
-                self.send_json(200, {
-                    "ok": True,
-                    "path": saved_path,
-                    "name": filename,
-                    "size": len(raw),
-                    "url": f"/api/upload/file?path={urllib.parse.quote(saved_path)}"
-                })
-            except Exception as e:
-                self.send_json(500, {"error": str(e)})
-            return
+                payload = json.loads(body_bytes.decode("utf-8"))
+            except Exception:
+                payload = {}
 
-        # 5. 插件/技能启用切换 API
-        elif path == "/api/plugins/toggle":
-            pid = payload.get("id", "")
-            enabled = bool(payload.get("enabled", True))
-            if not pid:
-                self.send_json(400, {"error": "缺少插件 ID"})
+            # 1. 新建会话
+            if path in ("/api/sessions/create", "/api/sessions"):
+                title = payload.get("title", "新任务会话")
+                sess = create_new_mimo_session_in_db(title=title)
+                self.send_json(200, sess)
                 return
-            ok = set_plugin_enabled(pid, enabled)
-            self.send_json(200, {"ok": ok, "id": pid, "enabled": enabled})
-            return
 
-        # 4. 中止当前任务
-        elif path == "/api/abort":
+            # 2. 发送任务消息 (携带真实 model 参数 & 完全访问权限自动批准 & 工作目录)
+            elif path == "/api/chat":
+                msg = payload.get("message", "").strip()
+                sid = payload.get("session_id", "").strip()
+                model = payload.get("model") or get_current_model()
+                valid_models = ("mimo-auto", "mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview")
+                if model not in valid_models:
+                    model = "mimo-auto"
 
-            sid = payload.get("session_id")
-            code, res = call_mimo_v1(f"sessions/{sid}/abort", method="POST", body={})
-            self.send_json(code, res)
-            return
+                if not msg or not sid:
+                    self.send_json(400, {"error": "缺少 message 或 session_id"})
+                    return
 
-        self.send_json(404, {"error": "Not Found"})
+                # 查询此 session 的真实工作目录 directory 与更新标题
+                directory = "/Users/zhouzheng"
+                if os.path.exists(MIMO_DB_PATH):
+                    try:
+                        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+                        c = conn.cursor()
+                        c.execute("SELECT directory, title FROM session WHERE id = ?", (sid,))
+                        row = c.fetchone()
+                        if row:
+                            if row[0]:
+                                directory = row[0]
+                            if not row[1] or row[1] in ("新任务会话", "新建任务会话", "未命名任务"):
+                                new_title = msg.replace("\n", " ")[:32].strip()
+                                c.execute("UPDATE session SET title = ? WHERE id = ?", (new_title, sid))
+                                conn.commit()
+                        conn.close()
+                    except Exception:
+                        pass
 
+                perm = payload.get("perm") or get_current_perm()
+                files = payload.get("files", [])
+                req_body = {
+                    "message": msg,
+                    "model": model,
+                    "perm": perm,
+                    "dir": directory,
+                }
+                if isinstance(files, list) and files:
+                    req_body["files"] = [f for f in files if isinstance(f, str) and f]
+
+                code, res = call_mimo_v1(
+                    f"sessions/{sid}/turns",
+                    method="POST",
+                    body=req_body,
+                )
+                self.send_json(code, res)
+                return
+
+            # 3. 真实模型切换与 preferences.json 同步持久化
+            elif path == "/api/model":
+                target = payload.get("model", "mimo-auto").strip()
+                valid_models = ("mimo-auto", "mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview")
+                if target in valid_models:
+                    ok = set_current_model(target)
+                    self.send_json(200, {"ok": ok, "current": target})
+                else:
+                    self.send_json(400, {"error": "不支持的模型 ID"})
+                return
+            # 3. 权限切换 API
+            elif path == "/api/perm":
+                target = payload.get("perm", "完全访问权限").strip()
+                sid = payload.get("session_id")
+                if target in ("完全访问权限", "帮我审批", "默认权限"):
+                    ok = set_current_perm(target, session_id=sid)
+                    self.send_json(200, {"ok": ok, "current": target})
+                else:
+                    self.send_json(400, {"error": "不支持的权限类别"})
+                return
+
+            # 4. 文件/图片上传 API
+            elif path == "/api/upload":
+                filename = payload.get("filename", "file.bin")
+                content_b64 = payload.get("content", "")
+                if not content_b64:
+                    self.send_json(400, {"error": "缺少文件内容"})
+                    return
+                try:
+                    raw = base64.b64decode(content_b64)
+                    safe_name = re.sub(r"[^a-zA-Z0-9_一-龥\.\-]", "_", os.path.basename(filename))
+                    saved_id = uuid.uuid4().hex[:12]
+                    saved_path = os.path.join(UPLOAD_DIR, f"{saved_id}_{safe_name}")
+                    with open(saved_path, "wb") as f:
+                        f.write(raw)
+                    self.send_json(200, {
+                        "ok": True,
+                        "path": saved_path,
+                        "name": filename,
+                        "size": len(raw),
+                        "url": f"/api/upload/file?path={urllib.parse.quote(saved_path)}"
+                    })
+                except Exception as e:
+                    self.send_json(500, {"error": str(e)})
+                return
+
+            # 5. 插件/技能启用切换 API
+            elif path == "/api/plugins/toggle":
+                pid = payload.get("id", "")
+                enabled = bool(payload.get("enabled", True))
+                if not pid:
+                    self.send_json(400, {"error": "缺少插件 ID"})
+                    return
+                ok = set_plugin_enabled(pid, enabled)
+                self.send_json(200, {"ok": ok, "id": pid, "enabled": enabled})
+                return
+
+            # 4. 中止当前任务
+            elif path == "/api/abort":
+
+                sid = payload.get("session_id")
+                code, res = call_mimo_v1(f"sessions/{sid}/abort", method="POST", body={})
+                self.send_json(code, res)
+                return
+
+            self.send_json(404, {"error": "Not Found"})
+
+
+        except Exception as e:
+            traceback.print_exc()
+            self.send_json(500, {"error": f"服务器内部错误: {str(e)}"})
 
 def start_pwa_server(port: int = DEFAULT_GATEWAY_PORT):
     desktop_port, _ = load_desktop_api_credentials()
