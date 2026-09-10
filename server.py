@@ -1342,17 +1342,23 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      flex-wrap: nowrap;
+      min-width: 0;
+      width: 100%;
       padding-top: 4px;
     }
 
     .dock-left-group {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
+      flex-shrink: 1;
+      min-width: 0;
+      flex-wrap: nowrap;
     }
     .btn-dock-icon {
-      width: 28px;
-      height: 28px;
+      width: 26px;
+      height: 26px;
       border-radius: 50%;
       display: flex;
       align-items: center;
@@ -1361,6 +1367,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       border: none;
       color: var(--text-muted);
       cursor: pointer;
+      flex-shrink: 0;
     }
     .btn-dock-icon:active {
       background: var(--bg-hover);
@@ -1368,50 +1375,168 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
 
     .dock-perm-badge {
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 3px;
       color: #EA580C;
-      font-size: 12.5px;
+      font-size: 12px;
       font-weight: 500;
       padding: 3px 6px;
       border-radius: 6px;
       cursor: pointer;
       user-select: none;
       transition: background 0.15s;
+      flex-shrink: 1;
+      min-width: 0;
+      white-space: nowrap;
     }
     .dock-perm-badge:hover {
       background: #FFF7ED;
+    }
+    #perm-name-label {
+      display: inline-block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 82px;
+      line-height: 1.2;
     }
 
     .dock-right-group {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 4px;
+      flex-shrink: 0;
+      min-width: 0;
+      flex-wrap: nowrap;
+    }
+
+    .dock-model-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
     }
 
     .dock-model-selector {
-      display: flex;
+      display: inline-flex;
       align-items: center;
-      gap: 5px;
-      font-size: 12.5px;
+      gap: 3px;
+      font-size: 12px;
       font-weight: 500;
       color: var(--text-body);
       background: transparent;
       border: none;
-      padding: 4px 6px;
+      padding: 3px 6px;
       border-radius: 6px;
       cursor: pointer;
       transition: all 0.15s;
+      white-space: nowrap;
+      flex-shrink: 1;
+      min-width: 0;
     }
     .dock-model-selector:hover {
       background: var(--bg-hover);
       color: var(--text-main);
     }
+    #model-name-label {
+      display: inline-block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 86px;
+      line-height: 1.2;
+    }
+
+    /* 气泡式悬浮模型选择菜单 (紧贴模型按钮，防超出屏幕智能贴靠) */
+    .model-popover-menu {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      right: 0;
+      width: 260px;
+      max-width: calc(100vw - 20px);
+      background: #FFFFFF;
+      border: 1px solid var(--border-subtle);
+      box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.18), 0 4px 12px rgba(0, 0, 0, 0.08);
+      border-radius: 14px;
+      padding: 10px 8px;
+      z-index: 250;
+      box-sizing: border-box;
+      animation: fadeIn 0.15s ease;
+    }
+    .model-popover-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 2px 8px 8px;
+      border-bottom: 1px solid var(--border-light);
+      margin-bottom: 6px;
+    }
+    .model-popover-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+    .model-popover-close {
+      cursor: pointer;
+      color: var(--text-dim);
+      font-size: 11px;
+      padding: 2px 5px;
+      border-radius: 4px;
+    }
+    .model-popover-close:hover {
+      background: rgba(0,0,0,0.05);
+      color: var(--text-main);
+    }
+    .model-popover-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+    .model-popover-item {
+      padding: 8px 10px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.12s ease;
+    }
+    .model-popover-item:hover {
+      background: #F8FAFC;
+    }
+    .model-popover-item.selected {
+      background: #FFF7ED;
+      border-color: #FED7AA;
+    }
+    .model-popover-item-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .model-popover-item-desc {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+      line-height: 1.3;
+    }
+    .model-popover-item-badge {
+      font-size: 10px;
+      font-weight: normal;
+      padding: 1px 5px;
+      border-radius: 4px;
+      background: #F1F3F5;
+      color: #4B5563;
+    }
 
     .btn-dock-send {
-      width: 32px;
-      height: 32px;
+      width: 28px;
+      height: 28px;
       border-radius: 50%;
       background: var(--text-main);
       color: #FFFFFF;
@@ -1421,10 +1546,88 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       justify-content: center;
       cursor: pointer;
       transition: all 0.15s;
+      flex-shrink: 0;
     }
     .btn-dock-send.abort {
       background: #EF4444 !important;
       color: #FFFFFF !important;
+    }
+
+    /* 移动端与窄屏单行自适应弹性适配 (不换行，放不下自动省略号) */
+    @media (max-width: 440px) {
+      .floating-mimo-island {
+        padding: 8px 10px 8px;
+      }
+      footer {
+        padding: 0 10px 10px;
+      }
+      .dock-left-group {
+        gap: 4px;
+      }
+      .dock-right-group {
+        gap: 3px;
+      }
+      .dock-perm-badge {
+        font-size: 11px;
+        padding: 2px 5px;
+        gap: 2px;
+      }
+      #perm-name-label {
+        max-width: 66px;
+      }
+      .dock-model-selector {
+        font-size: 11px;
+        padding: 2px 5px;
+        gap: 2px;
+      }
+      #model-name-label {
+        max-width: 70px;
+      }
+      .btn-dock-icon {
+        width: 24px;
+        height: 24px;
+      }
+      .btn-dock-send {
+        width: 26px;
+        height: 26px;
+      }
+    }
+
+    @media (max-width: 360px) {
+      .floating-mimo-island {
+        padding: 6px 8px 6px;
+      }
+      footer {
+        padding: 0 6px 6px;
+      }
+      .dock-left-group {
+        gap: 2px;
+      }
+      .dock-right-group {
+        gap: 2px;
+      }
+      .dock-perm-badge {
+        font-size: 10.5px;
+        padding: 2px 4px;
+      }
+      #perm-name-label {
+        max-width: 50px;
+      }
+      .dock-model-selector {
+        font-size: 10.5px;
+        padding: 2px 4px;
+      }
+      #model-name-label {
+        max-width: 54px;
+      }
+      .btn-dock-icon {
+        width: 22px;
+        height: 22px;
+      }
+      .btn-dock-send {
+        width: 24px;
+        height: 24px;
+      }
     }
 
     .dock-disclaimer {
@@ -1895,10 +2098,15 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
     .modal-box {
       width: 100%;
+      max-width: 600px;
+      margin: 0 auto;
+      box-sizing: border-box;
       background: #FFFFFF;
       border-radius: 20px 20px 0 0;
       padding: 20px 18px 30px;
       box-shadow: 0 -8px 32px rgba(0,0,0,0.12);
+      max-height: 85vh;
+      overflow-y: auto;
     }
     .modal-title {
       font-size: 15px;
@@ -2116,10 +2324,23 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             </div>
           </div>
 
-          <div class="dock-model-selector" onclick="toggleModelSheet(true)" id="dock-model-btn" title="当前模型: MiMo Auto (官方默认)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m13 2-2 2.5h3L11 9l7-3-4 6h3l-5 8 2-6h-3l2-6-5 3 2-6z"/></svg>
-            <span id="model-name-label">MiMo Auto</span>
-            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+          <div class="dock-model-wrap" id="dock-model-wrap">
+            <div class="dock-model-selector" onclick="toggleModelMenu(event)" id="dock-model-btn" title="当前模型: MiMo Auto (官方默认)">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m13 2-2 2.5h3L11 9l7-3-4 6h3l-5 8 2-6h-3l2-6-5 3 2-6z"/></svg>
+              <span id="model-name-label">MiMo Auto</span>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+            </div>
+
+            <!-- 紧贴模型按钮的气泡式弹出菜单 (智能屏幕边缘贴靠防溢出) -->
+            <div class="model-popover-menu" id="model-popover-menu" style="display:none;" onclick="event.stopPropagation()">
+              <div class="model-popover-head">
+                <span class="model-popover-title">切换模型</span>
+                <span class="model-popover-close" onclick="closeModelMenu(event)">✕</span>
+              </div>
+              <div class="model-popover-list" id="model-popover-list">
+                <div style="padding:12px 8px; text-align:center; color:var(--text-muted); font-size:11.5px;">正在同步模型列表...</div>
+              </div>
+            </div>
           </div>
 
           <button class="btn-dock-icon" id="btn-dock-voice" title="语音输入" onclick="toggleVoiceRecording(event)">
@@ -2258,9 +2479,25 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       const popover = document.getElementById("ctx-hud-popover");
       if (!popover) return;
       isContextHudOpen = !isContextHudOpen;
-      popover.style.display = isContextHudOpen ? "block" : "none";
       if (isContextHudOpen) {
+        closeModelMenu();
+        popover.style.display = "block";
         updateContextUsage(currentSessionId);
+        // 动态边界自适应贴靠：测量当前弹窗视口位置，防止超出屏幕边缘
+        requestAnimationFrame(() => {
+          popover.style.transform = "none";
+          const rect = popover.getBoundingClientRect();
+          const winWidth = window.innerWidth;
+          if (rect.right > winWidth - 8) {
+            const shift = rect.right - (winWidth - 8);
+            popover.style.transform = `translateX(-${shift}px)`;
+          } else if (rect.left < 8) {
+            const shift = 8 - rect.left;
+            popover.style.transform = `translateX(${shift}px)`;
+          }
+        });
+      } else {
+        popover.style.display = "none";
       }
     }
 
@@ -2273,6 +2510,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     document.addEventListener("click", (e) => {
       if (!e.target.closest(".ctx-hud-container")) {
         closeContextHud();
+      }
+      if (!e.target.closest(".dock-model-wrap")) {
+        closeModelMenu();
       }
     });
 
@@ -2930,9 +3170,48 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (open) loadSessionsList();
     }
 
+    function toggleModelMenu(e) {
+      if (e) e.stopPropagation();
+      const popover = document.getElementById("model-popover-menu");
+      if (!popover) return;
+      const isVisible = popover.style.display !== "none" && popover.style.display !== "";
+      if (isVisible) {
+        popover.style.display = "none";
+      } else {
+        closeContextHud();
+        popover.style.display = "block";
+        loadModelConfig();
+        
+        // 动态边界自适应贴靠：测量当前弹窗视口位置，防止超出屏幕边缘
+        requestAnimationFrame(() => {
+          popover.style.transform = "none";
+          const rect = popover.getBoundingClientRect();
+          const winWidth = window.innerWidth;
+          if (rect.right > winWidth - 8) {
+            const shift = rect.right - (winWidth - 8);
+            popover.style.transform = `translateX(-${shift}px)`;
+          } else if (rect.left < 8) {
+            const shift = 8 - rect.left;
+            popover.style.transform = `translateX(${shift}px)`;
+          }
+        });
+      }
+    }
+
+    function closeModelMenu(e) {
+      if (e) e.stopPropagation();
+      const popover = document.getElementById("model-popover-menu");
+      if (popover) popover.style.display = "none";
+    }
+
     function toggleModelSheet(open) {
-      document.getElementById("model-sheet").classList.toggle("open", open);
-      if (open) loadModelConfig();
+      if (open) {
+        toggleModelMenu();
+      } else {
+        closeModelMenu();
+        const sheet = document.getElementById("model-sheet");
+        if (sheet) sheet.classList.remove("open");
+      }
     }
 
     // 3. 真实模型配置加载与切换 (实时读取并持久化写入 preferences.json)
@@ -2950,39 +3229,75 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
 
     function renderModelList(models, curId) {
-      const container = document.getElementById("model-sheet-list");
-      if (!container) return;
-      container.innerHTML = "";
+      const popoverList = document.getElementById("model-popover-list");
+      const sheetList = document.getElementById("model-sheet-list");
+
       models.forEach(m => {
         const isSel = (m.id === curId);
         if (isSel) {
           selectedModelName = m.name;
           const lbl = document.getElementById("model-name-label");
-          if (lbl) lbl.textContent = m.name;
+          if (lbl) {
+            lbl.textContent = m.name;
+            lbl.title = `当前模型: ${m.name} (${m.desc || ""})`;
+          }
         }
-        const item = document.createElement("div");
-        item.className = "model-item " + (isSel ? "selected" : "");
-        item.onclick = () => selectRealModel(m.id, m.name);
-        item.innerHTML = `
-          <div>
-            <div class="model-item-name" style="display:flex;align-items:center;">
-              <span>${m.name}</span>
-              <span style="font-size:11px;font-weight:normal;padding:1px 6px;border-radius:4px;background:#F1F3F5;margin-left:6px;color:#4B5563;">${m.badge || "官方"}</span>
-            </div>
-            <div class="model-item-desc">${m.desc}</div>
-          </div>
-          <div style="color: #FF6900; font-weight: 700; font-size: 15px;">${isSel ? '✓' : ''}</div>
-        `;
-        container.appendChild(item);
       });
+
+      if (popoverList) {
+        popoverList.innerHTML = "";
+        models.forEach(m => {
+          const isSel = (m.id === curId);
+          const item = document.createElement("div");
+          item.className = "model-popover-item " + (isSel ? "selected" : "");
+          item.onclick = () => selectRealModel(m.id, m.name);
+          item.innerHTML = `
+            <div style="flex:1; min-width:0; margin-right:8px;">
+              <div class="model-popover-item-title">
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(m.name)}</span>
+                <span class="model-popover-item-badge">${escapeHtml(m.badge || "官方")}</span>
+              </div>
+              <div class="model-popover-item-desc">${escapeHtml(m.desc || "")}</div>
+            </div>
+            <div style="color: #FF6900; font-weight: 700; font-size: 14px; flex-shrink:0;">${isSel ? '✓' : ''}</div>
+          `;
+          popoverList.appendChild(item);
+        });
+      }
+
+      if (sheetList) {
+        sheetList.innerHTML = "";
+        models.forEach(m => {
+          const isSel = (m.id === curId);
+          const item = document.createElement("div");
+          item.className = "model-item " + (isSel ? "selected" : "");
+          item.onclick = () => selectRealModel(m.id, m.name);
+          item.innerHTML = `
+            <div>
+              <div class="model-item-name" style="display:flex;align-items:center;">
+                <span>${escapeHtml(m.name)}</span>
+                <span style="font-size:11px;font-weight:normal;padding:1px 6px;border-radius:4px;background:#F1F3F5;margin-left:6px;color:#4B5563;">${escapeHtml(m.badge || "官方")}</span>
+              </div>
+              <div class="model-item-desc">${escapeHtml(m.desc || "")}</div>
+            </div>
+            <div style="color: #FF6900; font-weight: 700; font-size: 15px;">${isSel ? '✓' : ''}</div>
+          `;
+          sheetList.appendChild(item);
+        });
+      }
     }
 
     async function selectRealModel(modelId, modelName) {
       selectedModelId = modelId;
       selectedModelName = modelName;
       const lbl = document.getElementById("model-name-label");
-      if (lbl) lbl.textContent = modelName;
-      toggleModelSheet(false);
+      if (lbl) {
+        lbl.textContent = modelName;
+        lbl.title = modelName;
+      }
+      closeModelMenu();
+      const sheet = document.getElementById("model-sheet");
+      if (sheet) sheet.classList.remove("open");
 
       try {
         const r = await fetch("/api/model", {
