@@ -56,12 +56,14 @@ The gateway does not patch binaries. Instead, it hooks into 6 key local runtime 
 
 | Integration Touchpoint | Local Path / Protocol | Mechanism & Practical Utility |
 | :--- | :--- | :--- |
-| **1. Dynamic Credentials** | `~/Library/Application Support/Xiaomi MiMo/desktop-api.json` | The desktop core starts on an ephemeral port. The gateway extracts the dynamic `port` and Bearer `token` automatically. |
+| **1. Dynamic Credentials** | macOS: `~/Library/Application Support/Xiaomi MiMo/desktop-api.json`<br>Linux: `~/.config/XiaomiMiMoDesktop/desktop-api.json` | The desktop core starts on an ephemeral port. The gateway extracts the dynamic `port` and Bearer `token` automatically. |
 | **2. Session & History DB**| `~/.local/share/mimocode/mimocode.db` (SQLite) | Direct SQLite integration: auto-inherits the workspace directory (`~`) and titles sessions based on first prompt. |
-| **3. Active Focus Linkage**| `~/Library/Application Support/Xiaomi MiMo/composer-input.json` | Reads user's active session on desktop (`activeSessionId`), automatically opening the current desktop task on mobile. |
-| **4. Model Persistence**   | `~/Library/Application Support/Xiaomi MiMo/preferences.json` | Directly updates persistent configuration when toggling models from mobile. |
-| **5. Desktop Avatar Sync** | `~/Library/Application Support/Xiaomi MiMo/Local Storage/leveldb` | Decodes `mimo.set.avatar` from LevelDB to render custom user avatars in the mobile drawer. |
-| **6. Weekly Quota Tracking**| `~/Library/Application Support/Xiaomi MiMo/Partitions/xiaomi-account/Cookies` | Reads Xiaomi SSO `passToken` to query remaining weekly quota percentage and reset schedules. |
+| **3. Active Focus Linkage**| `composer-input.json` under the data dir above | Reads user's active session on desktop (`activeSessionId`), automatically opening the current desktop task on mobile. |
+| **4. Model Persistence**   | `preferences.json` under the data dir above | Directly updates persistent configuration when toggling models from mobile. |
+| **5. Desktop Avatar Sync** | `Local Storage/leveldb` under the data dir above | Decodes `mimo.set.avatar` from LevelDB to render custom user avatars in the mobile drawer. |
+| **6. Weekly Quota Tracking**| `Partitions/xiaomi-account/Cookies` under the data dir above | Reads Xiaomi SSO `passToken` to query remaining weekly quota percentage and reset schedules. |
+
+> On startup the gateway auto-detects the data directory by preferring the path that contains `desktop-api.json`, so both macOS and Linux layouts work out of the box.
 
 ---
 
@@ -94,14 +96,25 @@ The gateway does not patch binaries. Instead, it hooks into 6 key local runtime 
 ## 🚀 Quick Start
 
 ### 1. Run the Gateway
-Ensure **Xiaomi MiMo** is running on your Mac, then start the gateway:
+Ensure **Xiaomi MiMo Desktop** is running, then start the gateway:
 
 ```bash
 git clone https://github.com/Nelson-zhou/mimo-pwa.git
 cd mimo-pwa
 
-# Start gateway (listening on 0.0.0.0:8080)
+# Option A: one-click script (auto-picks a free port)
+./start.sh
+
+# Option B: direct start (listens on 0.0.0.0:8080 by default)
 python3 server.py
+```
+
+If port 8080 is already taken (e.g. by qBittorrent), the gateway automatically tries the next free port, or you can pin one:
+
+```bash
+PORT=8081 ./start.sh
+# or
+python3 server.py --port 8081
 ```
 
 ### 2. Network Access
@@ -110,13 +123,14 @@ python3 server.py
 Exposes an official HTTPS certificate required for standalone PWA installation:
 
 ```bash
-# Enable HTTPS forwarding on port 8443
+# Enable HTTPS forwarding on port 8443 (use your actual gateway port)
 tailscale serve --https=8443 --bg 8080
 ```
-Open the generated HTTPS URL (e.g. `https://<device>.ts.net:8443`) in your phone's browser.
+
+The gateway auto-detects your Tailscale MagicDNS hostname and only advertises an HTTPS install URL when `tailscale serve status` actually forwards to the current gateway port. If none exists yet, run `tailscale serve` first (use your real gateway port, e.g. 8081).
 
 #### Option B: Local Wi-Fi
-Connect phone and computer to the same Wi-Fi, and open `http://<LAN_IP>:8080`.
+Connect phone and computer to the same Wi-Fi, and open `http://<LAN_IP>:8080` (or the auto-selected port).
 
 ### 3. Add to Home Screen
 - **iOS (Safari)**: Tap Share ➔ Tap **Add to Home Screen**.
@@ -130,7 +144,7 @@ Connect phone and computer to the same Wi-Fi, and open `http://<LAN_IP>:8080`.
 Usage: python3 server.py [options]
 
 Options:
-  --port PORT       Gateway listen port (default: 8080)
+  --port PORT       Gateway listen port (default: 8080; auto-increments if occupied)
   --host HOST       Interface IP to bind (default: 0.0.0.0)
   --workdir DIR     Default workspace directory for new sessions (default: ~)
 ```

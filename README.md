@@ -56,12 +56,14 @@ Xiaomi MiMo 官方仅提供 macOS / 桌面客户端，开发者离开电脑后�
 
 | 集成点 | 本地路径 / 协议 | 作用与实现原理 |
 | :--- | :--- | :--- |
-| **1. 动态服务凭据** | `~/Library/Application Support/Xiaomi MiMo/desktop-api.json` | 客户端启动时监听随机端口，网关自动提取其 `port` 与 Bearer `token`，完成免密反代。 |
+| **1. 动态服务凭据** | macOS: `~/Library/Application Support/Xiaomi MiMo/desktop-api.json`<br>Linux: `~/.config/XiaomiMiMoDesktop/desktop-api.json` | 客户端启动时监听随机端口，网关自动提取其 `port` 与 Bearer `token`，完成免密反代。 |
 | **2. 会话与历史库** | `~/.local/share/mimocode/mimocode.db` (SQLite) | 手机端新建会话直接写入 SQLite，自动继承当前工作目录；首条消息自动提炼并重命名标题。 |
-| **3. 桌面焦点联动** | `~/Library/Application Support/Xiaomi MiMo/composer-input.json` | 实时读取电脑上用户最后活跃的 `activeSessionId`，手机打开自动定位到该任务。 |
-| **4. 模型切换回写** | `~/Library/Application Support/Xiaomi MiMo/preferences.json` | 手机端切换模型后直接回写配置，使后续所有任务的模型选择永久生效。 |
-| **5. 真实用户头像** | `~/Library/Application Support/Xiaomi MiMo/Local Storage/leveldb` | 解析 LevelDB 中存储的 `mimo.set.avatar` 键值，动态提取并在移动端展示真实用户头像。 |
-| **6. 订阅配额监控** | `~/Library/Application Support/Xiaomi MiMo/Partitions/xiaomi-account/Cookies` | 提取小米 SSO `passToken`，实时查询本周剩余配额百分比与周重置倒计时。 |
+| **3. 桌面焦点联动** | 与数据目录同级的 `composer-input.json` | 实时读取电脑上用户最后活跃的 `activeSessionId`，手机打开自动定位到该任务。 |
+| **4. 模型切换回写** | 与数据目录同级的 `preferences.json` | 手机端切换模型后直接回写配置，使后续所有任务的模型选择永久生效。 |
+| **5. 真实用户头像** | 与数据目录同级的 `Local Storage/leveldb` | 解析 LevelDB 中存储的 `mimo.set.avatar` 键值，动态提取并在移动端展示真实用户头像。 |
+| **6. 订阅配额监控** | 与数据目录同级的 `Partitions/xiaomi-account/Cookies` | 提取小米 SSO `passToken`，实时查询本周剩余配额百分比与周重置倒计时。 |
+
+> 网关启动时会自动探测数据目录：优先查找含有 `desktop-api.json` 的路径，兼容 macOS 与 Linux 安装布局。
 
 ---
 
@@ -101,8 +103,19 @@ Xiaomi MiMo 官方仅提供 macOS / 桌面客户端，开发者离开电脑后�
 git clone https://github.com/Nelson-zhou/mimo-pwa.git
 cd mimo-pwa
 
-# 启动服务 (默认监听 0.0.0.0:8080)
+# 方式 A：一键启动（端口被占用时会自动切换）
+./start.sh
+
+# 方式 B：直接启动 (默认监听 0.0.0.0:8080)
 python3 server.py
+```
+
+若 8080 被其他程序占用（例如 qBittorrent），网关会自动尝试下一个可用端口，或手动指定：
+
+```bash
+PORT=8081 ./start.sh
+# 或
+python3 server.py --port 8081
 ```
 
 ### 2. 远程网络访问配置
@@ -111,10 +124,11 @@ python3 server.py
 通过 Tailscale 官方内置的 HTTPS 反向代理，可获得经过 CA 认证的合法 HTTPS 证书（满足 PWA 原生安装条件）：
 
 ```bash
-# 开启后台映射（仅需执行一次）
+# 开启后台映射（仅需执行一次；8080 改成你实际监听的端口）
 tailscale serve --https=8443 --bg 8080
 ```
-终端将输出专属安全链接（如 `https://<device>.ts.net:8443`），在手机浏览器打开即可。
+
+网关启动时会自动读取本机 MagicDNS 域名，并检查 `tailscale serve status`：**仅当存在转发到当前网关端口的 HTTPS 配置时**，才会在终端与页面中展示可点击的安装链接。若尚未配置，请先执行上面的 `tailscale serve` 命令（端口改成实际监听端口，例如 8081）。
 
 #### 方案 B：同一局域网 Wi-Fi 直连
 手机与电脑连接同一 Wi-Fi，手机浏览器直接访问终端输出的局域网 IP（如 `http://192.168.x.x:8080`）。
@@ -133,7 +147,7 @@ tailscale serve --https=8443 --bg 8080
 用法: python3 server.py [选项]
 
 选项:
-  --port PORT       指定服务监听端口 (默认: 8080)
+  --port PORT       指定服务监听端口 (默认: 8080；被占用时自动递增)
   --host HOST       指定监听网卡 IP (默认: 0.0.0.0)
   --workdir DIR     指定新建会话的默认物理工作目录 (默认: 当前用户 ~)
 ```

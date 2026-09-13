@@ -34,14 +34,44 @@ from typing import Any, Dict, List, Optional, Tuple
 import zlib
 
 DEFAULT_GATEWAY_PORT = 8080
-DESKTOP_API_JSON_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/desktop-api.json")
+
+
+def _resolve_mimo_data_dir() -> str:
+    """按平台定位 Xiaomi MiMo Desktop 用户数据目录。"""
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, "Library", "Application Support", "Xiaomi MiMo"),
+        os.path.join(home, ".config", "XiaomiMiMoDesktop"),
+        os.path.join(home, ".config", "Xiaomi MiMo"),
+        os.path.join(home, ".config", "Electron"),
+    ]
+    for path in candidates:
+        if os.path.isfile(os.path.join(path, "desktop-api.json")):
+            return path
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+MIMO_DATA_DIR = _resolve_mimo_data_dir()
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DESKTOP_API_JSON_PATH = os.path.join(MIMO_DATA_DIR, "desktop-api.json")
 MIMO_DB_PATH = os.path.expanduser("~/.local/share/mimocode/mimocode.db")
-COMPOSER_INPUT_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/composer-input.json")
-XIAOMI_CONFIRMED_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/xiaomi-last-confirmed.json")
-PREFERENCES_PATH = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
-AVATAR_PNG_PATH = "/Users/zhouzheng/.gemini/antigravity/scratch/avatar_circle.png"
-AVATAR_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mimo-pwa", "assets", "avatars")
-LEVELDB_DIR = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/Local Storage/leveldb")
+COMPOSER_INPUT_PATH = os.path.join(MIMO_DATA_DIR, "composer-input.json")
+XIAOMI_CONFIRMED_PATH = os.path.join(MIMO_DATA_DIR, "xiaomi-last-confirmed.json")
+PREFERENCES_PATH = os.path.join(MIMO_DATA_DIR, "preferences.json")
+AVATAR_PNG_PATH = os.path.expanduser("~/.gemini/antigravity/scratch/avatar_circle.png")
+_AVATAR_DIR_CANDIDATES = [
+    os.path.join(_SCRIPT_DIR, "assets", "avatars"),
+    os.path.join(_SCRIPT_DIR, "mimo-pwa", "assets", "avatars"),
+]
+AVATAR_ASSETS_DIR = next((p for p in _AVATAR_DIR_CANDIDATES if os.path.isdir(p)), _AVATAR_DIR_CANDIDATES[0])
+LEVELDB_DIR = os.path.join(MIMO_DATA_DIR, "Local Storage", "leveldb")
+HOME_DIR = os.path.expanduser("~")
+DEFAULT_WORKDIR = HOME_DIR
+DEFAULT_TAILSCALE_HTTPS_PORT = 8443
+GATEWAY_LISTEN_PORT: Optional[int] = None
 # avatar-id → filename mapping (from app.asar decompile)
 AVATAR_FILE_MAP = {
     "avatar-1": "avatar-1-B6KwUrRj.png",
@@ -456,7 +486,7 @@ def get_all_plugins() -> List[Dict[str, Any]]:
     if not target_dir:
         target_dir = os.path.expanduser("~/.local/share/mimocode/builtin_skills/desktop-1d6a9fe/skills")
 
-    ext_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/extensions.json")
+    ext_file = os.path.join(MIMO_DATA_DIR, "extensions.json")
     enabled_map = {}
     if os.path.exists(ext_file):
         try:
@@ -467,7 +497,7 @@ def get_all_plugins() -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    pref_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
+    pref_file = PREFERENCES_PATH
     if os.path.exists(pref_file):
         try:
             with open(pref_file, "r", encoding="utf-8") as f:
@@ -543,8 +573,8 @@ def get_all_plugins() -> List[Dict[str, Any]]:
 
 def set_plugin_enabled(plugin_id: str, enabled: bool) -> bool:
     """切换插件/技能的启用状态并同步持久化至 extensions.json 与 preferences.json"""
-    ext_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/extensions.json")
-    pref_file = os.path.expanduser("~/Library/Application Support/Xiaomi MiMo/preferences.json")
+    ext_file = os.path.join(MIMO_DATA_DIR, "extensions.json")
+    pref_file = PREFERENCES_PATH
     try:
         if os.path.exists(pref_file):
             try:
@@ -725,9 +755,7 @@ def get_user_quota() -> Dict[str, Any]:
     import shutil, tempfile, urllib.request, urllib.error
 
     # 1. 从 Electron Cookies DB 读取 SSO credentials
-    cookie_path = os.path.expanduser(
-        "~/Library/Application Support/Xiaomi MiMo/Partitions/xiaomi-account/Cookies"
-    )
+    cookie_path = os.path.join(MIMO_DATA_DIR, "Partitions", "xiaomi-account", "Cookies")
     pass_token = None
     user_id = None
     try:
@@ -802,49 +830,133 @@ def get_user_profile() -> Dict[str, Any]:
     }
 
 
+def _session_title_in_db(session_id: str) -> Optional[str]:
+    if not session_id or not os.path.exists(MIMO_DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT title FROM session
+            WHERE id = ?
+              AND title NOT LIKE 'checkpoint-writer%'
+              AND title NOT IN ('Auto Dream', 'Auto Distill', 'Title request', '测试会话REST')
+            """,
+            (session_id,),
+        )
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _latest_session_id_in_db() -> Optional[str]:
+    """数据库中最近更新的用户会话。"""
+    if not os.path.exists(MIMO_DB_PATH):
+        return None
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT id FROM session
+            WHERE title NOT LIKE 'checkpoint-writer%'
+              AND title NOT IN ('Auto Dream', 'Auto Distill', 'Title request', '测试会话REST')
+            ORDER BY time_updated DESC LIMIT 1
+            """
+        )
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _session_updated_ts(session_id: Optional[str]) -> int:
+    if not session_id or not os.path.exists(MIMO_DB_PATH):
+        return -1
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        c = conn.cursor()
+        c.execute("SELECT time_updated FROM session WHERE id = ?", (session_id,))
+        row = c.fetchone()
+        conn.close()
+        return int(row[0] or 0) if row else -1
+    except Exception:
+        return -1
+
+
 def get_desktop_current_session_id() -> Optional[str]:
-    """读取用户当前在电脑端窗口中聚焦打开的活跃会话 ID"""
+    """打开 PWA 时应落点的会话：桌面焦点优先，若焦点已过期则回退到最近更新会话。"""
+    focus_id: Optional[str] = None
     if os.path.exists(COMPOSER_INPUT_PATH):
         try:
             with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                # 桌面端当前打开的会话记录在 convoMeta 的键中
-                meta = data.get("convoMeta")
-                if meta and isinstance(meta, dict):
-                    keys = [k for k in meta.keys() if k.startswith("ses_")]
-                    if keys:
-                        return keys[-1]
-                cur = data.get("currentKey")
-                if cur and cur.startswith("ses_"):
-                    return cur
+            cur = data.get("currentKey")
+            if isinstance(cur, str) and cur.startswith("ses_"):
+                focus_id = cur
         except Exception:
             pass
 
-    if os.path.exists(MIMO_DB_PATH):
-        try:
-            conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
-            c = conn.cursor()
-            c.execute(
-                """
-                SELECT id FROM session 
-                WHERE title NOT LIKE 'checkpoint-writer%' 
-                  AND title NOT IN ('Auto Dream', 'Auto Distill', 'Title request', '新任务会话', '测试会话REST')
-                ORDER BY time_updated DESC LIMIT 1
-                """
-            )
-            row = c.fetchone()
-            conn.close()
-            if row and row[0]:
-                return row[0]
-        except Exception:
-            pass
+    latest_id = _latest_session_id_in_db()
 
-    return None
+    # 桌面焦点存在且仍是有效用户会话 → 优先同步桌面当前打开的任务
+    if focus_id and _session_title_in_db(focus_id) is not None:
+        focus_ts = _session_updated_ts(focus_id)
+        latest_ts = _session_updated_ts(latest_id)
+        # 焦点明显落后（例如 PWA 测试会话残留），改落最近会话
+        if latest_id and latest_ts > focus_ts:
+            return latest_id
+        return focus_id
+
+    return latest_id
 
 
-def create_new_mimo_session_in_db(title: str = "新任务会话", directory: str = "/Users/zhouzheng") -> Dict[str, Any]:
+def set_desktop_focus_session(session_id: str, directory: Optional[str] = None) -> None:
+    """把桌面 composer 焦点会话同步为 session_id，保证双端落点一致。"""
+    if not session_id or not os.path.exists(COMPOSER_INPUT_PATH):
+        return
+    try:
+        with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data["currentKey"] = session_id
+        meta = data.get("convoMeta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta[session_id] = {
+            "project": os.path.basename(directory) if directory else os.path.basename(HOME_DIR) or "workspace",
+            "directory": directory or DEFAULT_WORKDIR,
+        }
+        data["convoMeta"] = meta
+        with open(COMPOSER_INPUT_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def touch_session_updated(session_id: str) -> None:
+    if not session_id or not os.path.exists(MIMO_DB_PATH):
+        return
+    try:
+        now = int(time.time() * 1000)
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        c = conn.cursor()
+        c.execute("UPDATE session SET time_updated = ? WHERE id = ?", (now, session_id))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def create_new_mimo_session_in_db(title: str = "新任务会话", directory: Optional[str] = None) -> Dict[str, Any]:
     """在电脑本地数据库中创建一个全新的真实 MiMo 会话"""
     import uuid
+
+    if not directory:
+        directory = DEFAULT_WORKDIR
 
     new_id = "ses_" + uuid.uuid4().hex[:22]
     now = int(time.time() * 1000)
@@ -875,7 +987,7 @@ def create_new_mimo_session_in_db(title: str = "新任务会话", directory: str
             if "convoMeta" not in data or not isinstance(data["convoMeta"], dict):
                 data["convoMeta"] = {}
             data["convoMeta"][new_id] = {
-                "project": os.path.basename(directory) or "zhouzheng",
+                "project": os.path.basename(directory) or os.path.basename(HOME_DIR) or "workspace",
                 "directory": directory,
             }
             with open(COMPOSER_INPUT_PATH, "w", encoding="utf-8") as f:
@@ -928,24 +1040,181 @@ def call_mimo_v1(
 def get_tailscale_ip() -> Optional[str]:
     try:
         res = subprocess.run(["tailscale", "ip", "-4"], capture_output=True, text=True, timeout=2, check=False)
-        ip = res.stdout.strip().split("\n")[0]
-        if ip and not ip.startswith("Failed") and len(ip.split(".")) == 4:
+        ip = (res.stdout or "").strip().split("\n")[0]
+        if ip and ip.count(".") == 3 and ip.replace(".", "").isdigit():
             return ip
     except Exception:
         pass
-    return "100.111.25.116"
+    return None
 
 
 def get_local_lan_ip() -> str:
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
     except Exception:
         pass
-    return "192.168.31.197"
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except Exception:
+        return "127.0.0.1"
+
+
+def get_tailscale_magicdns_host() -> Optional[str]:
+    try:
+        res = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return None
+        status = json.loads(res.stdout)
+        dns = ((status.get("Self") or {}).get("DNSName") or "").strip().rstrip(".")
+        if dns and dns.endswith(".ts.net"):
+            return dns
+    except Exception:
+        pass
+    return None
+
+
+def _parse_serve_https_ports(serve_json: Dict[str, Any]) -> List[Tuple[int, Optional[int]]]:
+    """从 tailscale serve status --json 提取 (https_listen_port, target_local_port)。"""
+    found: List[Tuple[int, Optional[int]]] = []
+    seen: set = set()
+
+    def walk_handlers(handlers: Any) -> Optional[int]:
+        if not isinstance(handlers, dict):
+            return None
+        for cfg in handlers.values():
+            if not isinstance(cfg, dict):
+                continue
+            proxy = cfg.get("Proxy") or cfg.get("proxy")
+            if isinstance(proxy, str) and proxy.startswith("http://127.0.0.1:"):
+                try:
+                    return int(proxy.rsplit(":", 1)[-1])
+                except ValueError:
+                    return None
+            path = cfg.get("Path") or cfg.get("path")
+            if isinstance(path, str):
+                try:
+                    return int(path)
+                except ValueError:
+                    return None
+        return None
+
+    def extract_from_tcp_web(tcp: Any, web: Any) -> None:
+        if not isinstance(tcp, dict):
+            return
+        for port_s, tcp_cfg in tcp.items():
+            try:
+                listen_port = int(port_s)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(tcp_cfg, dict) or not (tcp_cfg.get("HTTPS") or tcp_cfg.get("https")):
+                continue
+            target = None
+            if isinstance(web, dict):
+                for _host, web_cfg in web.items():
+                    if isinstance(web_cfg, dict):
+                        handlers = web_cfg.get("Handlers") if "Handlers" in web_cfg else web_cfg
+                        target = walk_handlers(handlers)
+                        if target is not None:
+                            break
+            key = (listen_port, target)
+            if key not in seen:
+                seen.add(key)
+                found.append(key)
+
+    # 根节点直接含 TCP/Web（background serve）
+    extract_from_tcp_web(serve_json.get("TCP"), serve_json.get("Web"))
+
+    # Foreground / Background 分组
+    for section_key in ("Foreground", "Background"):
+        section = serve_json.get(section_key)
+        if not isinstance(section, dict):
+            continue
+        if "TCP" in section or "Web" in section:
+            extract_from_tcp_web(section.get("TCP"), section.get("Web"))
+            continue
+        for entry in section.values():
+            if isinstance(entry, dict):
+                extract_from_tcp_web(entry.get("TCP"), entry.get("Web"))
+                # 兼容嵌套 Web 里带 Handlers 的写法
+                web = entry.get("Web")
+                if isinstance(web, dict):
+                    for _host, web_cfg in web.items():
+                        if isinstance(web_cfg, dict) and "Handlers" in web_cfg:
+                            extract_from_tcp_web(entry.get("TCP"), {_host: web_cfg})
+
+    return found
+
+
+def get_tailscale_https_url(gateway_port: Optional[int] = None) -> Optional[str]:
+    """仅当存在转发到本网关的 tailscale serve HTTPS 时才返回可用安装地址。"""
+    host = get_tailscale_magicdns_host()
+    if not host:
+        return None
+    try:
+        res = subprocess.run(
+            ["tailscale", "serve", "status", "--json"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        if res.returncode != 0 or not res.stdout:
+            return None
+        serve_json = json.loads(res.stdout or "{}")
+    except Exception:
+        return None
+
+    pairs = _parse_serve_https_ports(serve_json)
+    if not pairs:
+        return None
+
+    port = gateway_port or GATEWAY_LISTEN_PORT
+    matched = [lp for lp, target in pairs if target == port]
+    if not matched and port is not None:
+        return None
+    listen_port = matched[0] if matched else pairs[0][0]
+    if listen_port == 443:
+        return f"https://{host}"
+    return f"https://{host}:{listen_port}"
+
+
+_PWA_HTTPS_CACHE: Dict[str, Any] = {"ts": 0.0, "url": None}
+
+
+def get_pwa_https_url_cached(ttl: float = 15.0) -> Optional[str]:
+    now = time.time()
+    if now - float(_PWA_HTTPS_CACHE["ts"]) < ttl:
+        return _PWA_HTTPS_CACHE["url"]
+    url = get_tailscale_https_url()
+    _PWA_HTTPS_CACHE["ts"] = now
+    _PWA_HTTPS_CACHE["url"] = url
+    return url
+
+
+def port_in_use(host: str, port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.4)
+        try:
+            return s.connect_ex((host if host != "0.0.0.0" else "127.0.0.1", port)) == 0
+        except OSError:
+            return False
+
+
+def pick_available_port(host: str, port: int, max_tries: int = 20) -> int:
+    for candidate in range(port, port + max_tries):
+        if not port_in_use(host, candidate):
+            return candidate
+    return port
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 # 官方 Xiaomi MiMo 纯正黑底四格几何矢量图标（来自客户端 Figma 1929:695 / 2046:263）
@@ -2735,9 +3004,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <span>📲 点击安装 Xiaomi MiMo 到手机桌面 (真 PWA 原生应用，无地址栏)</span>
   </div>
 
-  <div class="http-tip-banner" id="httpTipBanner" style="display:none;" onclick="location.href='https://macbook-pro.tail9f7768.ts.net:8443/'">
+  <div class="http-tip-banner" id="httpTipBanner" style="display:none;" onclick="openHttpsChannel()">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    <span>当前处于 HTTP 模式。点击一键进入 HTTPS 安全通道即可免浏览器框安装 PWA</span>
+    <span id="httpTipBannerText">当前处于 HTTP 模式。点击一键进入 HTTPS 安全通道即可免浏览器框安装 PWA</span>
   </div>
 
   <!-- 顶部导航条 -->
@@ -3722,8 +3991,24 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     if (!isStandalone && location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
       window.addEventListener("DOMContentLoaded", () => {
         const tip = document.getElementById("httpTipBanner");
-        if (tip) tip.style.display = "flex";
+        const text = document.getElementById("httpTipBannerText");
+        if (!tip) return;
+        if (window.MIMO_PWA_HTTPS_URL) {
+          if (text) text.textContent = "当前处于 HTTP 模式。点击一键进入 HTTPS 安全通道即可免浏览器框安装 PWA";
+        } else {
+          if (text) text.textContent = "尚未配置到本网关的 Tailscale HTTPS，暂无法一键跳转安装。请先在电脑执行 tailscale serve";
+        }
+        tip.style.display = "flex";
       });
+    }
+
+    function openHttpsChannel() {
+      if (window.MIMO_PWA_HTTPS_URL) {
+        location.href = window.MIMO_PWA_HTTPS_URL;
+        return;
+      }
+      const port = location.port || "8080";
+      alert("未检测到指向当前网关的 Tailscale HTTPS 配置。\\n请在电脑上执行：\\ntailscale serve --https=8443 --bg " + port + "\\n完成后刷新本页再点击横幅。");
     }
 
     // 捕获 Android / Chrome 官方原生 PWA 安装事件
@@ -3753,9 +4038,16 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         });
       } else {
         if (!isStandalone && location.protocol === 'http:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
-          location.href = "https://macbook-pro.tail9f7768.ts.net:8443/";
+          if (window.MIMO_PWA_HTTPS_URL) {
+            location.href = window.MIMO_PWA_HTTPS_URL;
+          } else {
+            alert("当前处于 HTTP 模式。请先在电脑端执行：\\ntailscale serve --https=8443 --bg " + location.port + "\\n然后使用 HTTPS 地址访问以安装 PWA。");
+          }
         } else {
-          alert("如需将 MiMo 安装为原生桌面应用：\\n1. 请使用手机 Chrome 访问 https://macbook-pro.tail9f7768.ts.net:8443\\n2. 点击右上角菜单【⋮】并选择【安装应用】或【添加到主屏幕】。");
+          const httpsHint = window.MIMO_PWA_HTTPS_URL
+            ? "1. 请使用手机 Chrome 访问 " + window.MIMO_PWA_HTTPS_URL
+            : "1. 请先在电脑端开启 tailscale serve，再用 HTTPS 地址访问";
+          alert("如需将 MiMo 安装为原生桌面应用：\\n" + httpsHint + "\\n2. 点击右上角菜单【⋮】并选择【安装应用】或【添加到主屏幕】。");
         }
       }
     }
@@ -4105,6 +4397,13 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       stopBusyWatch();
       setBusy(false);
       toggleDrawer(false);
+      try {
+        await fetch("/api/focus_session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sid })
+        });
+      } catch (e) {}
       await loadHistoricalMessages(sid, true);
       connectSessionSSE(sid);
       updateContextUsage(sid);
@@ -4762,7 +5061,14 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
 
         # 1. 前端页面
         if path in ("/", "/index.html"):
-            body = XIAOMI_MIMO_PWA_HTML.encode("utf-8")
+            https_url = get_pwa_https_url_cached()
+            runtime_cfg = f'<script>window.MIMO_PWA_HTTPS_URL={json.dumps(https_url or "")};</script>'
+            html = XIAOMI_MIMO_PWA_HTML
+            if "</head>" in html:
+                html = html.replace("</head>", runtime_cfg + "\n</head>", 1)
+            else:
+                html = runtime_cfg + html
+            body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -5025,7 +5331,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                         {
                             "id": r[0],
                             "title": r[1] or "未命名任务",
-                            "directory": r[2] or "/Users/zhouzheng",
+                            "directory": r[2] or DEFAULT_WORKDIR,
                             "time": {"created": r[3], "updated": r[4]},
                         }
                         for r in rows
@@ -5057,7 +5363,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 return
 
             # 查询此 session 的真实工作目录 directory
-            directory = "/Users/zhouzheng"
+            directory = DEFAULT_WORKDIR
             if os.path.exists(MIMO_DB_PATH):
                 try:
                     conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
@@ -5118,6 +5424,28 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                 self.send_json(200, sess)
                 return
 
+            # 1b. 同步桌面焦点会话
+            elif path == "/api/focus_session":
+                sid = payload.get("session_id") or payload.get("id")
+                if not sid:
+                    self.send_json(400, {"error": "缺少 session_id"})
+                    return
+                directory = None
+                if os.path.exists(MIMO_DB_PATH):
+                    try:
+                        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+                        c = conn.cursor()
+                        c.execute("SELECT directory FROM session WHERE id = ?", (sid,))
+                        row = c.fetchone()
+                        conn.close()
+                        if row:
+                            directory = row[0]
+                    except Exception:
+                        pass
+                set_desktop_focus_session(sid, directory=directory)
+                self.send_json(200, {"ok": True, "id": sid})
+                return
+
             # 2. 发送任务消息 (携带真实 model 参数 & 完全访问权限自动批准 & 工作目录)
             elif path == "/api/chat":
                 msg = payload.get("message", "").strip()
@@ -5139,7 +5467,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                     perm_rules = json.dumps([{"permission": "edit", "pattern": "*", "action": "allow"}])
 
                 # 查询此 session 的真实工作目录 directory、更新标题并预配置权限规则
-                directory = "/Users/zhouzheng"
+                directory = DEFAULT_WORKDIR
                 if os.path.exists(MIMO_DB_PATH):
                     try:
                         conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
@@ -5151,13 +5479,20 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                                 directory = row[0]
                             if not row[1] or row[1] in ("新任务会话", "新建任务会话", "未命名任务"):
                                 new_title = msg.replace("\n", " ")[:32].strip()
-                                c.execute("UPDATE session SET title = ?, permission = ? WHERE id = ?", (new_title, perm_rules, sid))
+                                c.execute(
+                                    "UPDATE session SET title = ?, permission = ?, time_updated = ? WHERE id = ?",
+                                    (new_title, perm_rules, int(time.time() * 1000), sid),
+                                )
                             else:
-                                c.execute("UPDATE session SET permission = ? WHERE id = ?", (perm_rules, sid))
+                                c.execute(
+                                    "UPDATE session SET permission = ?, time_updated = ? WHERE id = ?",
+                                    (perm_rules, int(time.time() * 1000), sid),
+                                )
                             conn.commit()
                         conn.close()
                     except Exception:
                         pass
+                set_desktop_focus_session(sid, directory=directory)
 
                 files = payload.get("files", [])
                 req_body = {
@@ -5260,8 +5595,34 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
             self.send_json(500, {"error": f"服务器内部错误: {str(e)}"})
 
-def start_pwa_server(port: int = DEFAULT_GATEWAY_PORT):
+def start_pwa_server(
+    port: int = DEFAULT_GATEWAY_PORT,
+    host: str = "0.0.0.0",
+    workdir: Optional[str] = None,
+):
+    global DEFAULT_WORKDIR
+    if workdir:
+        workdir = os.path.expanduser(workdir)
+        if os.path.isdir(workdir):
+            DEFAULT_WORKDIR = workdir
+        else:
+            print(f"⚠️  忽略无效 --workdir: {workdir}，继续使用 {DEFAULT_WORKDIR}")
+
     desktop_port, _ = load_desktop_api_credentials()
+
+    if port_in_use(host, port):
+        next_port = pick_available_port(host, port + 1)
+        if port_in_use(host, next_port) or next_port == port:
+            print(f"❌ 端口 {port} 已被占用，请换端口启动，例如: python3 server.py --port {port + 1}")
+            sys.exit(1)
+        print(f"⚠️  端口 {port} 已被占用，自动切换到 {next_port}")
+        port = next_port
+
+    global GATEWAY_LISTEN_PORT
+    GATEWAY_LISTEN_PORT = port
+    _PWA_HTTPS_CACHE["ts"] = 0.0
+
+    https_url = get_pwa_https_url_cached()
     tailscale_ip = get_tailscale_ip()
     lan_ip = get_local_lan_ip()
     active_sid = get_desktop_current_session_id()
@@ -5270,6 +5631,8 @@ def start_pwa_server(port: int = DEFAULT_GATEWAY_PORT):
     print("================================================================")
     print("🚀 Xiaomi MiMo Desktop 官方极简原质 PWA 网关 (v6.1.0)")
     print("================================================================")
+    print(f"📂 数据目录: {MIMO_DATA_DIR}")
+    print(f"📂 默认工作目录: {DEFAULT_WORKDIR}")
     if desktop_port:
         print(f"✅ 成功连接电脑端 Xiaomi MiMo 核心引擎 (端口: {desktop_port})")
         print(f"   已继承当前登录小米账号: {user.get('displayName')} (ID: {user.get('userId')})")
@@ -5279,16 +5642,27 @@ def start_pwa_server(port: int = DEFAULT_GATEWAY_PORT):
 
     print("\n----------------------------------------------------------------")
     print("📱 手机端访问与真 PWA 安装专属地址：")
-    print("   👉【真正原生 PWA 安装通道（HTTPS 安全证书，无浏览器框）】:")
-    print("      https://macbook-pro.tail9f7768.ts.net:8443")
+    if https_url:
+        print("   👉【真正原生 PWA 安装通道（HTTPS 安全证书，无浏览器框）】:")
+        print(f"      {https_url}")
+    else:
+        print("   👉【真正原生 PWA 安装通道】尚未配置指向本网关的 Tailscale HTTPS")
+        print(f"      可执行: tailscale serve --https={DEFAULT_TAILSCALE_HTTPS_PORT} --bg {port}")
     if tailscale_ip:
         print(f"\n   👉【Tailscale 远程直连（HTTP 备用通道）】:\n      http://{tailscale_ip}:{port}")
     print(f"\n   👉【同一 Wi-Fi 局域网访问】:\n      http://{lan_ip}:{port}")
     print(f"\n   👉【电脑本机测试】:\n      http://127.0.0.1:{port}")
     print("----------------------------------------------------------------\n")
-    print(f"📡 网关监听中 0.0.0.0:{port} ... 按 Ctrl+C 退出。\n")
+    print(f"📡 网关监听中 {host}:{port} ... 按 Ctrl+C 退出。\n")
+    sys.stdout.flush()
 
-    server = ThreadingHTTPServer(("0.0.0.0", port), XiaomiMiMoPwaHandler)
+    try:
+        server = ReusableThreadingHTTPServer((host, port), XiaomiMiMoPwaHandler)
+    except OSError as e:
+        print(f"❌ 监听 {host}:{port} 失败: {e}")
+        print(f"   可尝试: python3 server.py --port {port + 1} --host 0.0.0.0")
+        sys.exit(1)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -5301,5 +5675,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Xiaomi MiMo Desktop PWA Gateway")
     parser.add_argument("--port", type=int, default=DEFAULT_GATEWAY_PORT, help="Gateway listen port")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Gateway bind address")
+    parser.add_argument(
+        "--workdir",
+        type=str,
+        default=None,
+        help="Default physical work directory for new sessions (default: ~)",
+    )
     args = parser.parse_args()
-    start_pwa_server(args.port)
+    start_pwa_server(args.port, host=args.host, workdir=args.workdir)
