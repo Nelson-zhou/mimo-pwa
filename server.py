@@ -1312,7 +1312,7 @@ PWA_MANIFEST_JSON = json.dumps(
 )
 
 PWA_SERVICE_WORKER_JS = """
-const CACHE_NAME = 'mimo-pwa-v16';
+const CACHE_NAME = 'mimo-pwa-v17';
 const PRECACHE = [
   '/',
   '/index.html',
@@ -2077,6 +2077,89 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       0%, 20% { opacity: 0.25; }
       50% { opacity: 1; }
       100% { opacity: 0.25; }
+    }
+
+    /* 任务进行中：顶部/底部常驻动效 */
+    .task-live-top,
+    .task-live-bottom {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #1D4ED8;
+      user-select: none;
+      pointer-events: none;
+      z-index: 45;
+    }
+    .task-live-top.show,
+    .task-live-bottom.show {
+      display: flex;
+    }
+    .task-live-top {
+      position: fixed;
+      top: 52px;
+      left: 0;
+      right: 0;
+      height: 36px;
+      padding: 0 16px;
+      justify-content: center;
+      background: linear-gradient(90deg, #EFF6FF 0%, #EDE9FE 45%, #EFF6FF 100%);
+      background-size: 200% 100%;
+      border-bottom: 1px solid #DBEAFE;
+    }
+    .task-live-top.show {
+      animation: taskLiveIn 0.22s ease-out, taskShimmer 1.8s linear infinite;
+    }
+    .task-live-bottom {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: 126px;
+      min-height: 40px;
+      max-width: min(92vw, 420px);
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid #BFDBFE;
+      box-shadow: 0 8px 24px rgba(37, 99, 235, 0.12);
+      white-space: nowrap;
+    }
+    .task-live-bottom.show {
+      animation: taskLiveIn 0.22s ease-out;
+    }
+    @keyframes taskShimmer {
+      0% { background-position: 0% 50%; }
+      100% { background-position: 200% 50%; }
+    }
+    .task-live-orb {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #3B82F6;
+      box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45);
+      animation: taskOrbPulse 1.4s infinite ease-out;
+      flex-shrink: 0;
+    }
+    @keyframes taskOrbPulse {
+      0% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.45); transform: scale(1); }
+      70% { box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); transform: scale(1.05); }
+      100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); transform: scale(1); }
+    }
+    .task-live-label { overflow: hidden; text-overflow: ellipsis; }
+    .task-live-elapsed {
+      color: #3B82F6;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+    .task-live-shimmer {
+      width: 42px;
+      height: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #DBEAFE, #93C5FD, #DBEAFE);
+      background-size: 200% 100%;
+      animation: taskShimmer 1.2s linear infinite;
+      flex-shrink: 0;
     }
 
     /* 助手消息底部的真实操作栏 */
@@ -3108,6 +3191,22 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <div class="msg-assistant-container" id="init-loader">
       <div class="assistant-prose-card">⏳ 正在同步电脑端当前会话...</div>
     </div>
+  </div>
+
+  <!-- 任务进行中：顶部动效条 -->
+  <div class="task-live-top" id="task-live-top" aria-live="polite">
+    <span class="task-live-orb"></span>
+    <span class="task-live-label">MiMo 正在工作</span>
+    <span class="task-live-elapsed" id="task-live-top-elapsed">0s</span>
+    <span class="task-live-shimmer"></span>
+  </div>
+
+  <!-- 任务进行中：底部动效胶囊 -->
+  <div class="task-live-bottom" id="task-live-bottom" aria-live="polite">
+    <span class="task-live-orb"></span>
+    <span class="task-live-label">任务执行中</span>
+    <span class="task-live-elapsed" id="task-live-bottom-elapsed">0s</span>
+    <span class="task-live-shimmer"></span>
   </div>
 
   <!-- 1:1 官方浮岛式输入框 (带 完全访问 / MiMo Auto / 动态上下文指示器 / 真实语音输入) -->
@@ -4619,6 +4718,48 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     }
 
     let busyStartTime = 0;
+    let taskLiveTimer = null;
+
+    function formatElapsed(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      if (s < 60) return s + "s";
+      const m = Math.floor(s / 60);
+      const rs = s % 60;
+      if (m < 60) return m + "m " + String(rs).padStart(2, "0") + "s";
+      const h = Math.floor(m / 60);
+      return h + "h " + String(m % 60).padStart(2, "0") + "m";
+    }
+
+    function paintTaskLiveUI() {
+      const elapsed = formatElapsed(Date.now() - (busyStartTime || Date.now()));
+      const topE = document.getElementById("task-live-top-elapsed");
+      const botE = document.getElementById("task-live-bottom-elapsed");
+      if (topE) topE.textContent = elapsed;
+      if (botE) botE.textContent = elapsed;
+      const th = document.getElementById("active-thinking-indicator");
+      if (th) th.innerHTML = '正在工作 · 已处理 ' + elapsed + '<span class="dot-pulse">...</span>';
+    }
+
+    function startTaskLiveUI() {
+      const top = document.getElementById("task-live-top");
+      const bot = document.getElementById("task-live-bottom");
+      if (top) top.classList.add("show");
+      if (bot) bot.classList.add("show");
+      paintTaskLiveUI();
+      if (taskLiveTimer) clearInterval(taskLiveTimer);
+      taskLiveTimer = setInterval(paintTaskLiveUI, 1000);
+    }
+
+    function stopTaskLiveUI() {
+      if (taskLiveTimer) {
+        clearInterval(taskLiveTimer);
+        taskLiveTimer = null;
+      }
+      const top = document.getElementById("task-live-top");
+      const bot = document.getElementById("task-live-bottom");
+      if (top) top.classList.remove("show");
+      if (bot) bot.classList.remove("show");
+    }
 
     function showThinkingIndicator(wrap) {
       removeThinkingIndicator(wrap);
@@ -4626,7 +4767,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       const el = document.createElement("div");
       el.className = "mimo-thinking-text";
       el.id = "active-thinking-indicator";
-      el.innerHTML = '思考中<span class="dot-pulse">...</span>';
+      el.innerHTML = '正在工作 · 已处理 ' + formatElapsed(Date.now() - (busyStartTime || Date.now())) + '<span class="dot-pulse">...</span>';
       wrap.appendChild(el);
       const vp = document.getElementById("chat-viewport");
       if (vp) vp.scrollTop = vp.scrollHeight;
@@ -4837,9 +4978,13 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
     function setBusy(busy) {
       isBusy = busy;
-      if (!busy) {
+      if (busy) {
+        if (!busyStartTime) busyStartTime = Date.now();
+        startTaskLiveUI();
+      } else {
         stopBusyWatch();
         removeThinkingIndicator(activeAssistantBox);
+        stopTaskLiveUI();
       }
       const btn = document.getElementById("btn-dock-send");
       if (busy) {
