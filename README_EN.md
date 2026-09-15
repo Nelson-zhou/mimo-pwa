@@ -165,6 +165,22 @@ Options:
 
 ---
 
+## 🛡️ Security & Privacy Guard
+
+This repository enforces strict security and privacy standards. For detailed rules and checklists, please refer to [**SECURITY_GUARD.md**](./SECURITY_GUARD.md).
+
+To prevent accidental leaks of personal privacy (UIDs, cookies, private Tailnet hostnames, local paths) or illegal contents, you can activate the local pre-commit guard:
+
+```bash
+# Install git pre-commit security hook
+./scripts/install-hooks.sh
+
+# Run security and compliance scan manually
+./scripts/security-check.sh
+```
+
+---
+
 ## 📄 License
 
 Distributed under the [MIT License](./LICENSE).

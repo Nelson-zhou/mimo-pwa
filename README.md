@@ -168,6 +168,22 @@ tailscale serve --https=8443 --bg 8080
 
 ---
 
+## 🛡️ 安全与隐私合规守卫
+
+本项目遵循严格的代码安全与隐私合规准则，详细规范与检查清单请参阅 [**SECURITY_GUARD.md**](./SECURITY_GUARD.md)。
+
+为防止意外提交个人隐私（账号 UID、Cookie、私有 Tailnet 域名、本地主机路径等）或违法违规信息，推荐在克隆仓库后启用本地 Git 提交拦截守卫：
+
+```bash
+# 一键安装 Git Pre-Commit 安全拦截钩子
+./scripts/install-hooks.sh
+
+# 手动执行安全合规扫描
+./scripts/security-check.sh
+```
+
+---
+
 ## 📄 许可证
 
 基于 [MIT License](./LICENSE) 开源发布。

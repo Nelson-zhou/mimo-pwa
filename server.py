@@ -6,7 +6,7 @@ Xiaomi MiMo Desktop 官方极简原质 PWA 网关 (v6.0.0)
 深度继承与还原 Xiaomi MiMo Desktop 官方界面色调与品牌特征：
 - 1:1 官方明亮色调 (#FFFFFF / #F8F9FA) 与极简设计语言
 - 继承官方 Logo: [Xiaomi MIMO Beta]
-- 动态继承客户端登录用户头像与昵称 (Nelson / 1225308396)
+- 动态继承客户端登录用户头像与昵称
 - 继承官方浮岛输入框样式与 [完全访问] / [MiMo Auto] / [免责声明]
 - 继承官方代码块样式 (带行号与复制按钮)
 - 支持新建任务会话、自动重命名、大模型选择面板与高频状态轮询守护
@@ -61,7 +61,7 @@ MIMO_DB_PATH = os.path.expanduser("~/.local/share/mimocode/mimocode.db")
 COMPOSER_INPUT_PATH = os.path.join(MIMO_DATA_DIR, "composer-input.json")
 XIAOMI_CONFIRMED_PATH = os.path.join(MIMO_DATA_DIR, "xiaomi-last-confirmed.json")
 PREFERENCES_PATH = os.path.join(MIMO_DATA_DIR, "preferences.json")
-AVATAR_PNG_PATH = os.path.expanduser("~/.gemini/antigravity/scratch/avatar_circle.png")
+AVATAR_PNG_PATH = os.path.join(_SCRIPT_DIR, "assets", "avatar_default.png")
 _AVATAR_DIR_CANDIDATES = [
     os.path.join(_SCRIPT_DIR, "assets", "avatars"),
     os.path.join(_SCRIPT_DIR, "mimo-pwa", "assets", "avatars"),
@@ -813,8 +813,8 @@ def get_user_quota() -> Dict[str, Any]:
 
 def get_user_profile() -> Dict[str, Any]:
     """读取客户端当前登录的小米账号昵称与用户 ID"""
-    name = "Nelson"
-    uid = "1225308396"
+    name = "MiMo User"
+    uid = ""
     if os.path.exists(XIAOMI_CONFIRMED_PATH):
         try:
             with open(XIAOMI_CONFIRMED_PATH, "r", encoding="utf-8") as f:
@@ -3133,7 +3133,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <div class="sidebar-footer-user">
       <img src="/icons/avatar.png" class="sidebar-user-avatar" id="user-avatar-img" alt="Avatar"
            onclick="toggleWeeklyUsage(event)" title="点击查看本周用量">
-      <span class="sidebar-user-name" id="user-name-label">Nelson</span>
+      <span class="sidebar-user-name" id="user-name-label">MiMo</span>
     </div>
   </div>
 
