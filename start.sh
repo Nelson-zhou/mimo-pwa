@@ -10,6 +10,11 @@ cd "$DIR"
 
 export PYTHONUNBUFFERED=1
 
+if [ "$1" = "--install-service" ] || [ "$1" = "--service" ]; then
+    shift
+    exec "$DIR/install-service.sh" "$@"
+fi
+
 # 1. 检查 Python 3
 if ! command -v python3 &>/dev/null; then
     echo "❌ 错误: 未检测到 Python 3，请先安装 Python 3.9+。"
@@ -69,4 +74,5 @@ if port_in_use "$PORT"; then
 fi
 
 echo "🚀 正在启动 Xiaomi MiMo PWA 网关 (端口: $PORT)..."
+echo "💡 提示: 若需开机自启且在后台长久常驻，推荐执行: ./install-service.sh"
 exec python3 -u server.py --port "$PORT" "$@"

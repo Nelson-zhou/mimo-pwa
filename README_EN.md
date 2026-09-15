@@ -102,10 +102,15 @@ Ensure **Xiaomi MiMo Desktop** is running, then start the gateway:
 git clone https://github.com/Nelson-zhou/mimo-pwa.git
 cd mimo-pwa
 
-# Option A: one-click script (auto-picks a free port)
+# Option A: one-click script (auto-picks a free port, for testing & debugging)
 ./start.sh
 
-# Option B: direct start (listens on 0.0.0.0:8080 by default)
+# Option B: persistent systemd service (Recommended for Linux: auto-start on boot & crash recovery)
+./install-service.sh
+# or customize the port
+PORT=8081 ./install-service.sh
+
+# Option C: direct start (listens on 0.0.0.0:8080 by default)
 python3 server.py
 ```
 
@@ -116,6 +121,15 @@ PORT=8081 ./start.sh
 # or
 python3 server.py --port 8081
 ```
+
+#### 💡 Systemd Service Management
+When installed as a persistent user service, you can manage it anytime:
+- **Check Status**: `systemctl --user status mimo-pwa`
+- **Follow Logs**: `journalctl --user -u mimo-pwa -f`
+- **Restart Service**: `systemctl --user restart mimo-pwa`
+- **Stop Service**: `systemctl --user stop mimo-pwa`
+- **Uninstall Service**: `./uninstall-service.sh`
+
 
 ### 2. Network Access
 

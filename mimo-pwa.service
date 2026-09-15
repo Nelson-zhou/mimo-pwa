@@ -1,0 +1,14 @@
+[Unit]
+Description=Xiaomi MiMo Desktop PWA Gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/mimo-pwa
+ExecStart=/usr/bin/python3 -u %h/mimo-pwa/server.py --port 8081
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

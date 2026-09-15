@@ -1312,7 +1312,7 @@ PWA_MANIFEST_JSON = json.dumps(
 )
 
 PWA_SERVICE_WORKER_JS = """
-const CACHE_NAME = 'mimo-pwa-v17';
+const CACHE_NAME = 'mimo-pwa-v19';
 const PRECACHE = [
   '/',
   '/index.html',
@@ -1322,6 +1322,10 @@ const PRECACHE = [
   '/icons/apple-touch-icon.png?v=mimo-2026',
   '/icons/avatar.png'
 ];
+
+self.addEventListener('message', (e) => {
+  if (e.data && e.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
 
 self.addEventListener('install', (e) => {
   e.waitUntil(
@@ -1340,62 +1344,54 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// 图标优先请求网络，确保官方 MiMo 视觉立刻生效，离线时回退缓存；API 直接透传；HTML stale-while-revalidate
+async function networkFirst(request) {
+  const cache = await caches.open(CACHE_NAME);
+  try {
+    const fresh = await fetch(request);
+    if (fresh && fresh.status === 200 && fresh.type !== 'opaque') {
+      cache.put(request, fresh.clone());
+    }
+    return fresh;
+  } catch (err) {
+    const cached = await cache.match(request, { ignoreSearch: true });
+    if (cached) return cached;
+    const shell = await cache.match('/index.html') || await cache.match('/');
+    if (shell) return shell;
+    throw err;
+  }
+}
+
+async function cacheFirst(request, { revalidate = true } = {}) {
+  const cache = await caches.open(CACHE_NAME);
+  const cached = await cache.match(request, { ignoreSearch: true });
+  if (cached) {
+    if (revalidate) {
+      fetch(request).then((res) => {
+        if (res && res.status === 200) cache.put(request, res.clone());
+      }).catch(() => {});
+    }
+    return cached;
+  }
+  const res = await fetch(request);
+  if (res && res.status === 200) cache.put(request, res.clone());
+  return res;
+}
+
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
-  if (e.request.url.includes('/api/')) return;
-
   const url = new URL(e.request.url);
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
 
-  // 图标优先请求网络
-  if (url.pathname.startsWith('/icons/') || url.pathname.includes('apple-touch-icon')) {
-    e.respondWith(
-      fetch(e.request).then((response) => {
-        if (response.status === 200) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((c) => c.put(e.request, clone));
-        }
-        return response;
-      }).catch(() => caches.match(e.request))
-    );
-    return;
-  }
+  const isHTML = (e.request.headers.get('accept') || '').includes('text/html')
+    || url.pathname === '/'
+    || url.pathname === '/index.html';
+  const isStatic = /[.](js|css|svg|png|ico|json|woff2?)$/.test(url.pathname);
 
-  const isHTML = e.request.headers.get('accept')?.includes('text/html');
-  const isStatic = /[.](js|css|svg|png|ico|json)$/.test(url.pathname);
-
-  if (isStatic) {
-    e.respondWith(
-      caches.match(e.request).then((cached) => {
-        if (cached) return cached;
-        return fetch(e.request).then((response) => {
-          if (response.status === 200) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((c) => c.put(e.request, clone));
-          }
-          return response;
-        });
-      })
-    );
-  } else if (isHTML) {
-    e.respondWith(
-      fetch(e.request).then((response) => {
-        if (response.status === 200) {
-          caches.open(CACHE_NAME).then((c) => c.put(e.request, response.clone()));
-        }
-        return response;
-      }).catch(() => caches.match(e.request))
-    );
-  } else {
-    e.respondWith(
-      fetch(e.request).then((response) => {
-        if (response.status === 200) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((c) => c.put(e.request, clone));
-        }
-        return response;
-      }).catch(() => caches.match(e.request))
-    );
+  if (isHTML) {
+    e.respondWith(networkFirst(e.request));
+  } else if (isStatic || url.pathname.startsWith('/icons/')) {
+    e.respondWith(cacheFirst(e.request, { revalidate: true }));
   }
 });
 """
@@ -2079,9 +2075,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       100% { opacity: 0.25; }
     }
 
-    /* 任务进行中：顶部/底部常驻动效 */
-    .task-live-top,
-    .task-live-bottom {
+    /* 任务进行中：顶部常驻动效 */
+    .task-live-top {
       display: none;
       align-items: center;
       gap: 10px;
@@ -2091,12 +2086,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       user-select: none;
       pointer-events: none;
       z-index: 45;
-    }
-    .task-live-top.show,
-    .task-live-bottom.show {
-      display: flex;
-    }
-    .task-live-top {
       position: fixed;
       top: 52px;
       left: 0;
@@ -2109,24 +2098,12 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       border-bottom: 1px solid #DBEAFE;
     }
     .task-live-top.show {
+      display: flex;
       animation: taskLiveIn 0.22s ease-out, taskShimmer 1.8s linear infinite;
     }
-    .task-live-bottom {
-      position: fixed;
-      left: 50%;
-      transform: translateX(-50%);
-      bottom: 126px;
-      min-height: 40px;
-      max-width: min(92vw, 420px);
-      padding: 8px 14px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.96);
-      border: 1px solid #BFDBFE;
-      box-shadow: 0 8px 24px rgba(37, 99, 235, 0.12);
-      white-space: nowrap;
-    }
-    .task-live-bottom.show {
-      animation: taskLiveIn 0.22s ease-out;
+    @keyframes taskLiveIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
     }
     @keyframes taskShimmer {
       0% { background-position: 0% 50%; }
@@ -3201,14 +3178,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     <span class="task-live-shimmer"></span>
   </div>
 
-  <!-- 任务进行中：底部动效胶囊 -->
-  <div class="task-live-bottom" id="task-live-bottom" aria-live="polite">
-    <span class="task-live-orb"></span>
-    <span class="task-live-label">任务执行中</span>
-    <span class="task-live-elapsed" id="task-live-bottom-elapsed">0s</span>
-    <span class="task-live-shimmer"></span>
-  </div>
-
   <!-- 1:1 官方浮岛式输入框 (带 完全访问 / MiMo Auto / 动态上下文指示器 / 真实语音输入) -->
   <footer>
     <div class="floating-mimo-island">
@@ -4078,9 +4047,10 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
-        navigator.serviceWorker.register("/sw.js", { scope: "/" })
+        navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" })
           .then((reg) => {
             reg.update();
+            if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
           })
           .catch(() => {});
       });
@@ -4733,18 +4703,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     function paintTaskLiveUI() {
       const elapsed = formatElapsed(Date.now() - (busyStartTime || Date.now()));
       const topE = document.getElementById("task-live-top-elapsed");
-      const botE = document.getElementById("task-live-bottom-elapsed");
       if (topE) topE.textContent = elapsed;
-      if (botE) botE.textContent = elapsed;
       const th = document.getElementById("active-thinking-indicator");
       if (th) th.innerHTML = '正在工作 · 已处理 ' + elapsed + '<span class="dot-pulse">...</span>';
     }
 
     function startTaskLiveUI() {
       const top = document.getElementById("task-live-top");
-      const bot = document.getElementById("task-live-bottom");
       if (top) top.classList.add("show");
-      if (bot) bot.classList.add("show");
       paintTaskLiveUI();
       if (taskLiveTimer) clearInterval(taskLiveTimer);
       taskLiveTimer = setInterval(paintTaskLiveUI, 1000);
@@ -4756,9 +4722,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         taskLiveTimer = null;
       }
       const top = document.getElementById("task-live-top");
-      const bot = document.getElementById("task-live-bottom");
       if (top) top.classList.remove("show");
-      if (bot) bot.classList.remove("show");
     }
 
     function showThinkingIndicator(wrap) {
@@ -5021,6 +4985,13 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       activeToolsMap = {};
     }
 
+    function markTaskRunning(sid) {
+      if (isBusy) return;
+      if (!busyStartTime) busyStartTime = Date.now();
+      setBusy(true);
+      if (sid) startBusyWatch(sid);
+    }
+
     function connectSessionSSE(sid) {
       if (activeSseSource) activeSseSource.close();
       activeSseSource = new EventSource("/api/events?session_id=" + sid);
@@ -5036,6 +5007,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
         // ── 文本流（累积全文，平滑流畅渲染）──────────────────────────
         if (type === "text-partial" && typeof ev.text === "string") {
+          markTaskRunning(sid);
           if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
           removeThinkingIndicator(activeAssistantBox);
           if (!activeTextCard) {
@@ -5049,6 +5021,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
 
           if (ui.kind === "text") {
+            markTaskRunning(sid);
             removeThinkingIndicator(activeAssistantBox);
             // 检查是否切换到了新的 text part（多步输出支持）
             if (ui.partID && ui.partID !== activeTextPartId) {
@@ -5067,6 +5040,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
           } else if (ui.kind === "tool") {
             // 工具调用卡片实时更新：工具产生时，前一段文本已结束
+            markTaskRunning(sid);
             removeThinkingIndicator(activeAssistantBox);
             flushProseRender();
             activeTextCard = null;
@@ -5085,9 +5059,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         } else if (type === "permission" || type === "permission.asked") {
           // no-op (已全局放行)
 
-        // ── busy 心跳（忽略，不做任何处理）─────────────────────
+        // ── busy 心跳：桌面已在跑任务时，打开 PWA 也要亮起动效 ──
         } else if (type === "busy") {
-          // no-op
+          markTaskRunning(sid);
 
         // ── idle：AI 完成 ─────────────────────────────────────
         } else if (type === "idle" || type === "session.idle") {
@@ -5216,6 +5190,8 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             body = html.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 交给 SW 管缓存：HTTP 层可协商，但不禁止 SW 存档
+            self.send_header("Cache-Control", "no-cache")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

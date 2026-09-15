@@ -103,10 +103,15 @@ Xiaomi MiMo 官方仅提供 macOS / 桌面客户端，开发者离开电脑后�
 git clone https://github.com/Nelson-zhou/mimo-pwa.git
 cd mimo-pwa
 
-# 方式 A：一键启动（端口被占用时会自动切换）
+# 方式 A：一键快速启动（适合即时调试，端口被占用时自动递增）
 ./start.sh
 
-# 方式 B：直接启动 (默认监听 0.0.0.0:8080)
+# 方式 B：系统级守护服务（强烈推荐 Linux 用户：开机自启 / 崩溃自愈 / 锁屏断网不掉线）
+./install-service.sh
+# 或指定监听端口安装
+PORT=8081 ./install-service.sh
+
+# 方式 C：直接启动 (默认监听 0.0.0.0:8080)
 python3 server.py
 ```
 
@@ -117,6 +122,15 @@ PORT=8081 ./start.sh
 # 或
 python3 server.py --port 8081
 ```
+
+#### 💡 系统服务常用管理命令 (Systemd)
+安装为系统守护服务后，可在任意终端随时管理：
+- **查看运行状态**：`systemctl --user status mimo-pwa`
+- **查看实时输出日志**：`journalctl --user -u mimo-pwa -f`
+- **重启服务**：`systemctl --user restart mimo-pwa`
+- **停止服务**：`systemctl --user stop mimo-pwa`
+- **一键卸载服务**：`./uninstall-service.sh`
+
 
 ### 2. 远程网络访问配置
 
