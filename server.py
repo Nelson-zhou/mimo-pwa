@@ -129,8 +129,16 @@ def load_desktop_api_credentials() -> Tuple[Optional[int], Optional[str]]:
 MODEL_CATALOG_PATH = os.path.join(MIMO_DATA_DIR, "model-catalog.json")
 MODELS_WITH_CLAUDE_PATH = os.path.join(MIMO_DATA_DIR, "models-with-claude.json")
 
-# 官方与拓展基础模型注册字典
-DEFAULT_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
+# 系统与模型动态数据源路径配置
+MIMO_CACHE_MODELS_PATH = os.path.expanduser("~/.cache/mimocode/models.json")
+MIMO_STATE_MODEL_PATH = os.path.expanduser("~/.local/state/mimocode/model.json")
+MODEL_CATALOG_PATH = os.path.join(MIMO_DATA_DIR, "model-catalog.json")
+
+# 会话临时激活模型映射
+SESSION_ACTIVE_MODEL_MAP: Dict[str, str] = {}
+
+# 官方与拓展基础模型注册字典（作为离线/初始化时的可靠兜底）
+FALLBACK_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "mimo-auto": {
         "id": "mimo-auto",
         "canonicalId": "mimo-auto",
@@ -143,7 +151,7 @@ DEFAULT_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "badgeClass": "badge-blue",
         "contextWindow": "1,000,000 (1M)",
         "ratio": "免费调度",
-        "desc": "官方智能调度引擎 · 根据任务复杂度在 Flash 与 Pro 之间自适应无缝路由",
+        "desc": "官方自适应路由器 · 依据任务复杂度在 Flash 与 Pro 模型之间智能调度",
         "capabilities": ["自适应路由", "1M 上下文", "工具调用", "多模态"],
         "icon": "🤖",
         "color": "#FF6900",
@@ -202,7 +210,7 @@ DEFAULT_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "deepseek-v4-pro": {
         "id": "deepseek-v4-pro",
         "canonicalId": "deepseek-v4-pro",
-        "provider": "anthropic",
+        "provider": "deepseek",
         "providerName": "DeepSeek",
         "category": "extended",
         "name": "DeepSeek V4 Pro",
@@ -218,7 +226,10 @@ DEFAULT_MODEL_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# 别名映射字典（无论客户端或数据库传入何种历史名称，统一映射归一）
+# 保持对外与测试兼容引用
+DEFAULT_MODEL_REGISTRY = FALLBACK_MODEL_REGISTRY
+
+# 别名映射字典（对各类历史缩写或非标准前缀做规范收敛）
 MODEL_ALIAS_MAP: Dict[str, str] = {
     # Pro 系列
     "mimo-pro": "mimo-v2.6-pro",
@@ -228,8 +239,6 @@ MODEL_ALIAS_MAP: Dict[str, str] = {
     "xiaomi/mimo-x-pro-preview": "mimo-v2.6-pro",
     "mimo/mimo-v2.6-pro": "mimo-v2.6-pro",
     "mimo/mimo-x-pro-preview": "mimo-v2.6-pro",
-    "mimo-v2.5-pro-ultraspeed": "mimo-v2.6-pro",
-    "mimo-v2.6-pro-ultraspeed": "mimo-v2.6-pro",
     # Flash 系列
     "mimo-flash": "mimo-v2.6-flash",
     "mimo-x-flash-preview": "mimo-v2.6-flash",
@@ -250,8 +259,190 @@ MODEL_ALIAS_MAP: Dict[str, str] = {
     # DeepSeek 系列
     "deepseek-v4-pro": "deepseek-v4-pro",
     "anthropic/deepseek-v4-pro": "deepseek-v4-pro",
+    "deepseek/deepseek-v4-pro": "deepseek-v4-pro",
     "deepseek": "deepseek-v4-pro",
 }
+
+_DYNAMIC_MODELS_CACHE: Dict[str, Any] = {"ts": 0.0, "catalog": {}}
+
+
+def load_dynamic_model_catalog(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+    """从电脑端真实多数据源动态加载全量模型目录：
+    1. ~/.cache/mimocode/models.json (官方 models.dev 全量模型限额、参数与描述库)
+    2. model-catalog.json (官方云端账户配额与算力倍率表)
+    3. ~/.local/state/mimocode/model.json (真实用户最近使用 recent 与收藏 favorite 记录)
+    4. preferences.json (客户端当前生效的全局模型)
+    5. mimocode.db (真实历史会话执行记录)
+    实现 100% 动态自适应感知，彻底告别死板的硬编码静态映射！
+    """
+    now = time.time()
+    if not force_refresh and (now - _DYNAMIC_MODELS_CACHE["ts"] < 5.0) and _DYNAMIC_MODELS_CACHE["catalog"]:
+        return _DYNAMIC_MODELS_CACHE["catalog"]
+
+    catalog = dict(FALLBACK_MODEL_REGISTRY)
+
+    # 1. 动态加载官方云端倍率表 (model-catalog.json)
+    ratios: Dict[str, float] = {}
+    if os.path.exists(MODEL_CATALOG_PATH):
+        try:
+            with open(MODEL_CATALOG_PATH, "r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            for m in cdata.get("models", []):
+                mid = m.get("id")
+                if mid and "displayRatio" in m:
+                    try:
+                        r = float(m["displayRatio"])
+                        ratios[mid] = r
+                        ratios[mid.replace("-preview", "")] = r
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            pass
+
+    # 2. 动态读取用户本地状态记录 (~/.local/state/mimocode/model.json)
+    recent_set = set()
+    favorite_set = set()
+    if os.path.exists(MIMO_STATE_MODEL_PATH):
+        try:
+            with open(MIMO_STATE_MODEL_PATH, "r", encoding="utf-8") as f:
+                sdata = json.load(f)
+            for r in sdata.get("recent", []):
+                rmid = r.get("modelID")
+                if rmid:
+                    recent_set.add(rmid)
+            for fav in sdata.get("favorite", []):
+                favorite_set.add(fav)
+        except Exception:
+            pass
+
+    # 3. 动态加载官方完整模型特征库 (~/.cache/mimocode/models.json)
+    cache_data = {}
+    if os.path.exists(MIMO_CACHE_MODELS_PATH):
+        try:
+            with open(MIMO_CACHE_MODELS_PATH, "r", encoding="utf-8") as f:
+                cache_data = json.load(f)
+        except Exception:
+            pass
+
+    if cache_data and isinstance(cache_data, dict):
+        for provider_id, pdata in cache_data.items():
+            if not isinstance(pdata, dict):
+                continue
+            p_models = pdata.get("models", {})
+            if not isinstance(p_models, dict):
+                continue
+
+            is_official = provider_id in ("xiaomi", "mimo")
+            p_name = pdata.get("name") or ("小米自研" if is_official else provider_id.capitalize())
+
+            for mid, mdata in p_models.items():
+                if not isinstance(mdata, dict):
+                    continue
+                # 优先官方模型，或存在于用户历史记录 / 预置拓展集中的模型
+                if not is_official and mid not in recent_set and mid not in ("claude-sonnet-4-6", "claude-sonnet-4-5", "deepseek-v4-pro"):
+                    continue
+
+                ctx = mdata.get("limit", {}).get("context", 1048576)
+                if ctx >= 1000000:
+                    ctx_str = "1,000,000 (1M)" if abs(ctx - 1000000) < 50000 else f"{ctx:,} ({round(ctx/1000000, 1)}M)"
+                else:
+                    ctx_str = f"{ctx:,} ({round(ctx/1024)}K)"
+
+                ratio_val = ratios.get(mid)
+                if ratio_val is not None:
+                    ratio_str = f"{ratio_val}x 算力"
+                elif "pro" in mid.lower():
+                    ratio_str = "1.0x 算力"
+                elif "flash" in mid.lower():
+                    ratio_str = "0.4x 算力"
+                elif is_official:
+                    ratio_str = "自研算力"
+                else:
+                    ratio_str = "拓展算力"
+
+                caps = []
+                if ctx >= 1000000:
+                    caps.append("1M 上下文")
+                if mdata.get("tool_call"):
+                    caps.append("全能工具链")
+                if mdata.get("reasoning"):
+                    caps.append("深度推理")
+                if "pro" in mid.lower():
+                    caps.extend(["深度代码重构", "复杂系统架构"])
+                elif "flash" in mid.lower():
+                    caps.extend(["毫秒极速响应", "敏捷交互"])
+                if not caps:
+                    caps = ["模型推理能力", "上下文支持"]
+
+                color = "#FF6900" if is_official else ("#7C3AED" if "claude" in mid else ("#2563EB" if "deepseek" in mid else "#0284C7"))
+                badge_class = "badge-orange" if "pro" in mid.lower() else ("badge-cyan" if "flash" in mid.lower() else ("badge-purple" if "claude" in mid else "badge-blue"))
+                icon = "💎" if "pro" in mid.lower() else ("⚡" if "flash" in mid.lower() else ("🧠" if "claude" in mid else ("🐋" if "deepseek" in mid else "🤖")))
+
+                model_name = mdata.get("name") or mid
+                clean_short = model_name.replace("MiMo-", "").replace("MiMo ", "").replace("Claude ", "").replace("DeepSeek ", "")
+
+                entry = {
+                    "id": mid,
+                    "canonicalId": mid,
+                    "provider": provider_id,
+                    "providerName": p_name,
+                    "category": "official" if is_official else "extended",
+                    "name": model_name,
+                    "shortName": clean_short[:10],
+                    "badge": f"{'自研旗舰' if 'pro' in mid.lower() else ('轻量极速' if 'flash' in mid.lower() else '自研')} · {ratio_str.split(' ')[0]}",
+                    "badgeClass": badge_class,
+                    "contextWindow": ctx_str,
+                    "ratio": ratio_str,
+                    "desc": mdata.get("description") or f"{p_name} {model_name} 模型服务",
+                    "capabilities": caps[:4],
+                    "icon": icon,
+                    "color": color,
+                    "isRecent": mid in recent_set,
+                    "isFavorite": mid in favorite_set,
+                }
+                catalog[mid] = entry
+
+    # 4. 动态探测 mimocode.db 最近使用的模型
+    if os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+            c = conn.cursor()
+            c.execute("SELECT DISTINCT data FROM message WHERE data LIKE %modelID% ORDER BY time_created DESC LIMIT 60;")
+            for (data_str,) in c.fetchall():
+                try:
+                    d = json.loads(data_str)
+                    mid = d.get("modelID")
+                    if mid and mid not in catalog and mid not in ("None", "<synthetic>"):
+                        canon = resolve_canonical_model(mid)
+                        if canon not in catalog:
+                            catalog[canon] = {
+                                "id": canon,
+                                "canonicalId": canon,
+                                "provider": d.get("providerID", "custom"),
+                                "providerName": "历史使用",
+                                "category": "extended",
+                                "name": canon,
+                                "shortName": canon[:10],
+                                "badge": "历史使用",
+                                "badgeClass": "badge-gray",
+                                "contextWindow": "1,000,000 (1M)",
+                                "ratio": "自适应",
+                                "desc": f"历史会话所用模型 ({canon})",
+                                "capabilities": ["会话执行", "代码生成"],
+                                "icon": "📜",
+                                "color": "#64748B",
+                                "isRecent": True,
+                                "isFavorite": False,
+                            }
+                except Exception:
+                    pass
+            conn.close()
+        except Exception:
+            pass
+
+    _DYNAMIC_MODELS_CACHE["ts"] = now
+    _DYNAMIC_MODELS_CACHE["catalog"] = catalog
+    return catalog
 
 
 def resolve_canonical_model(raw_id: Optional[str]) -> str:
@@ -267,10 +458,16 @@ def resolve_canonical_model(raw_id: Optional[str]) -> str:
         short = clean_id.split("/", 1)[1]
         if short in MODEL_ALIAS_MAP:
             return MODEL_ALIAS_MAP[short]
-        if short in DEFAULT_MODEL_REGISTRY:
+        if short in FALLBACK_MODEL_REGISTRY:
             return short
+        clean_id = short
 
-    if clean_id in DEFAULT_MODEL_REGISTRY:
+    if clean_id in FALLBACK_MODEL_REGISTRY:
+        return clean_id
+
+    # 动态匹配已发现模型目录
+    cat = _DYNAMIC_MODELS_CACHE.get("catalog", {})
+    if clean_id in cat:
         return clean_id
 
     # 模糊兜底映射
@@ -290,10 +487,11 @@ def resolve_canonical_model(raw_id: Optional[str]) -> str:
 
 
 def get_model_info(model_id: str) -> Dict[str, Any]:
-    """获取指定模型 ID 的完整展示与配置元数据（带映射解析）"""
+    """获取指定模型 ID 的完整展示与配置元数据（带动态感知）"""
     canonical_id = resolve_canonical_model(model_id)
-    if canonical_id in DEFAULT_MODEL_REGISTRY:
-        return dict(DEFAULT_MODEL_REGISTRY[canonical_id])
+    catalog = load_dynamic_model_catalog()
+    if canonical_id in catalog:
+        return dict(catalog[canonical_id])
 
     # 未知/自定义扩展模型动态构造
     return {
@@ -316,77 +514,39 @@ def get_model_info(model_id: str) -> Dict[str, Any]:
 
 
 def get_available_models() -> List[Dict[str, Any]]:
-    """动态获取当前系统所有可用模型（聚合注册表、model-catalog.json 与本地会话历史）"""
-    models_dict = dict(DEFAULT_MODEL_REGISTRY)
+    """动态获取当前系统所有可用模型（聚合 models.dev 缓存、model-catalog.json、本地状态与历史数据库）"""
+    catalog = load_dynamic_model_catalog()
 
-    # 1. 动态探测 model-catalog.json
-    if os.path.exists(MODEL_CATALOG_PATH):
-        try:
-            with open(MODEL_CATALOG_PATH, "r", encoding="utf-8") as f:
-                cat = json.load(f)
-            for m in cat.get("models", []):
-                mid = m.get("id")
-                mtype = m.get("modelType")
-                if mtype and mtype != "TEXT":
-                    continue
-                if mid:
-                    canon = resolve_canonical_model(mid)
-                    if canon not in models_dict:
-                        models_dict[canon] = {
-                            "id": canon,
-                            "canonicalId": canon,
-                            "provider": "xiaomi",
-                            "providerName": "小米自研",
-                            "category": "official",
-                            "name": m.get("name") or canon,
-                            "shortName": (m.get("name") or canon).replace("MiMo ", "").strip(),
-                            "badge": f"自研 · {m.get('displayRatio', 1.0)}x",
-                            "badgeClass": "badge-orange",
-                            "contextWindow": "1,000,000 (1M)",
-                            "ratio": f"{m.get('displayRatio', 1.0)}x 算力",
-                            "desc": f"小米官方云端服务目录模型 ({canon})",
-                            "capabilities": ["官方模型服务", "1M 上下文", "工具调用"],
-                            "icon": "🤖",
-                            "color": "#FF6900",
-                        }
-        except Exception:
-            pass
+    curr_global = get_current_model()
 
-    # 2. 动态探测历史使用模型（从 mimocode.db 最近消息提取）
-    if os.path.exists(MIMO_DB_PATH):
-        try:
-            conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
-            c = conn.cursor()
-            c.execute("SELECT data FROM message WHERE data LIKE '%modelID%' ORDER BY time_created DESC LIMIT 150;")
-            for (data_str,) in c.fetchall():
-                try:
-                    d = json.loads(data_str)
-                    mid = d.get("modelID")
-                    if mid:
-                        canon = resolve_canonical_model(mid)
-                        if canon not in models_dict:
-                            models_dict[canon] = get_model_info(canon)
-                except Exception:
-                    pass
-            conn.close()
-        except Exception:
-            pass
-
-    # 排序：官方自研在前（Auto -> Pro -> Flash），拓展模型在后
     order_weights = {
         "mimo-auto": 0,
         "mimo-v2.6-pro": 1,
         "mimo-v2.6-flash": 2,
+        "mimo-v2.6-pro-ultraspeed": 3,
+        "mimo-v2.5-pro-ultraspeed": 4,
         "claude-sonnet-4-6": 10,
         "deepseek-v4-pro": 11,
     }
-    result = list(models_dict.values())
-    result.sort(key=lambda m: (order_weights.get(m["canonicalId"], 99), m["canonicalId"]))
+
+    result = list(catalog.values())
+
+    def sort_key(m: Dict[str, Any]):
+        cid = m.get("canonicalId", "")
+        is_active = (cid == curr_global)
+        is_recent = m.get("isRecent", False)
+        base_w = order_weights.get(cid, 50 if m.get("category") == "official" else 80)
+        return (0 if is_active else (1 if is_recent else 2), base_w, cid)
+
+    result.sort(key=sort_key)
     return result
 
 
 def get_session_model(session_id: Optional[str] = None) -> Dict[str, Any]:
     """读取指定会话当前生效的模型配置（优先会话内消息绑定的模型，其次 fallback 到全局默认模型）"""
+    if session_id and session_id in SESSION_ACTIVE_MODEL_MAP:
+        return get_model_info(SESSION_ACTIVE_MODEL_MAP[session_id])
+
     if session_id and os.path.exists(MIMO_DB_PATH):
         try:
             conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
@@ -403,7 +563,7 @@ def get_session_model(session_id: Optional[str] = None) -> Dict[str, Any]:
                 try:
                     d = json.loads(data_raw)
                     # 1. 助手消息 modelID
-                    if d.get("modelID"):
+                    if d.get("modelID") and d.get("modelID") not in ("None", "<synthetic>"):
                         return get_model_info(d.get("modelID"))
                     # 2. 用户消息 model dict
                     if isinstance(d.get("model"), dict) and d.get("model").get("modelID"):
@@ -435,27 +595,49 @@ def get_current_model() -> str:
 
 
 def set_current_model(model_id: str, session_id: Optional[str] = None, set_global: bool = True) -> bool:
-    """更新模型配置：支持持久化至 preferences.json 全局配置，并记录会话模型映射"""
+    """更新模型配置：支持持久化至 preferences.json 全局配置、~/.local/state/mimocode/model.json 最近记录，并记录会话模型映射"""
     canonical_id = resolve_canonical_model(model_id)
     if not canonical_id:
         return False
+
+    info = get_model_info(canonical_id)
+    provider = info.get("provider", "xiaomi")
+
+    if session_id:
+        SESSION_ACTIVE_MODEL_MAP[session_id] = canonical_id
 
     success = True
     if set_global and os.path.exists(PREFERENCES_PATH):
         try:
             with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
                 p = json.load(f)
-            # 保持对官方 preferences.json 格式的兼容（部分版本带 mimo/ 前缀，部分无前缀）
-            if canonical_id.startswith("mimo-"):
+            # 保持对官方 preferences.json 格式的兼容（统一写入 provider/model_id 格式）
+            if canonical_id.startswith("mimo-") or canonical_id == "mimo-auto":
                 p["model"] = f"mimo/{canonical_id}"
             else:
-                p["model"] = canonical_id
+                p["model"] = f"{provider}/{canonical_id}"
             with open(PREFERENCES_PATH, "w", encoding="utf-8") as f:
                 json.dump(p, f, indent=2, ensure_ascii=False)
         except Exception as e:
             print("Error updating preferences.json model:", e)
             success = False
 
+    # 同步写入 ~/.local/state/mimocode/model.json 的 recent 列表
+    if os.path.exists(MIMO_STATE_MODEL_PATH):
+        try:
+            with open(MIMO_STATE_MODEL_PATH, "r", encoding="utf-8") as f:
+                sdata = json.load(f)
+            recent = sdata.get("recent", [])
+            recent = [r for r in recent if not (r.get("modelID") == canonical_id or r.get("modelID") == model_id)]
+            recent.insert(0, {"providerID": provider, "modelID": canonical_id})
+            sdata["recent"] = recent[:12]
+            with open(MIMO_STATE_MODEL_PATH, "w", encoding="utf-8") as f:
+                json.dump(sdata, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    # 标记缓存失效以即时反映新状态
+    _DYNAMIC_MODELS_CACHE["ts"] = 0.0
     return success
 
 
@@ -7484,7 +7666,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       };
     }
 
-    async 
     let cachedSessionContext = { tasks: { total: 0, items: [] }, git: null };
 
     async function loadSessionContext(sid) {

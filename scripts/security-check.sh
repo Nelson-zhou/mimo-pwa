@@ -107,6 +107,15 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+echo -e "${BLUE}🧪 [PWA Live E2E Guard] 运行本地电脑 PWA 真实访问与渲染回归测试...${NC}"
+if python3 -m unittest tests/test_pwa_live_e2e.py >/dev/null 2>&1; then
+    echo -e "${GREEN}   ✓ 本地浏览器访问与首屏无头渲染回归测试 100% 校验通过${NC}"
+else
+    echo -e "${RED}❌ [拦截] 本地 PWA 访问异常或界面渲染报错！${NC}"
+    python3 -m unittest tests/test_pwa_live_e2e.py
+    FAILURES=$((FAILURES + 1))
+fi
+
 # 4. 审查结果判定
 echo "----------------------------------------------------------------"
 if [ "$FAILURES" -gt 0 ]; then
