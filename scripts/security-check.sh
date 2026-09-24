@@ -55,27 +55,26 @@ done
 # 2. 检查内容中是否包含敏感隐私特征
 # 定义检查规则数组: "描述|正则表达式|排除文件正则"
 RULES=(
-    "硬编码的小米 UID|1225308396|scripts/security-check\.sh"
-    "硬编码的 Tailscale 专属 MagicDNS 域名|tail[0-9a-f]{6}\.ts\.net|scripts/security-check\.sh"
-    "硬编码的开发者主目录绝对路径|/home/[a-zA-Z0-9._-]+/mimo|scripts/security-check\.sh"
-    "内部 scratch 临时工具路径|\.gemini/antigravity|scripts/security-check\.sh"
-    "硬编码真实 Bearer 令牌或长秘钥|[0-9a-f]{64}|scripts/security-check\.sh"
+    "硬编码的小米 UID|1225308396"
+    "硬编码的 Tailscale 专属 MagicDNS 域名|tail[0-9a-f]{6}\.ts\.net"
+    "硬编码的开发者主目录绝对路径|/home/[a-zA-Z0-9._-]+/mimo"
+    "内部 scratch 临时工具路径|\.gemini/antigravity"
+    "硬编码真实 Bearer 令牌或长秘钥|[0-9a-f]{64}"
 )
 
 for file in $FILES_TO_CHECK; do
-    # 忽略二进制文件与本检查脚本自身
+    # 忽略二进制文件与安全审查脚本自身、说明文档
     if [ ! -f "$file" ] || git check-attr -a "$file" 2>/dev/null | grep -q "binary: set"; then
+        continue
+    fi
+    base_file=$(basename "$file")
+    if [ "$base_file" = "security-check.sh" ] || [ "$base_file" = "SECURITY_GUARD.md" ] || [ "$base_file" = "install-hooks.sh" ]; then
         continue
     fi
 
     for rule in "${RULES[@]}"; do
         DESC=$(echo "$rule" | cut -d'|' -f1)
         REGEX=$(echo "$rule" | cut -d'|' -f2)
-        EXCLUDE=$(echo "$rule" | cut -d'|' -f3)
-
-        if [ -n "$EXCLUDE" ] && echo "$file" | grep -Eq "$EXCLUDE"; then
-            continue
-        fi
 
         # 在文件中检索命中行
         MATCHES=$(grep -EIn "$REGEX" "$file" 2>/dev/null || true)
@@ -89,7 +88,26 @@ for file in $FILES_TO_CHECK; do
     done
 done
 
-# 3. 审查结果判定
+# 3. 自动化测试套件自检 (语法/防白屏/模型映射)
+echo -e "${BLUE}🧪 [PWA Syntax Guard] 运行前端 JavaScript 语法与防白屏自动化自检...${NC}"
+if python3 -m unittest tests/test_pwa_syntax.py >/dev/null 2>&1; then
+    echo -e "${GREEN}   ✓ 前端 JavaScript 语法与初始化机制 100% 校验通过${NC}"
+else
+    echo -e "${RED}❌ [拦截] 前端 JavaScript 存在语法错误或防卡死机制失效！${NC}"
+    python3 -m unittest tests/test_pwa_syntax.py
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo -e "${BLUE}🧪 [Model Mapping Guard] 运行模型映射与会话感知自动化自检...${NC}"
+if python3 -m unittest tests/test_model_mapping.py >/dev/null 2>&1; then
+    echo -e "${GREEN}   ✓ 模型注册表与别名映射机制 100% 校验通过${NC}"
+else
+    echo -e "${RED}❌ [拦截] 模型映射逻辑或单元测试未通过！${NC}"
+    python3 -m unittest tests/test_model_mapping.py
+    FAILURES=$((FAILURES + 1))
+fi
+
+# 4. 审查结果判定
 echo "----------------------------------------------------------------"
 if [ "$FAILURES" -gt 0 ]; then
     echo -e "${RED}🛑 安全审查未通过！共发现 ${FAILURES} 处潜在隐私或安全问题。${NC}"
