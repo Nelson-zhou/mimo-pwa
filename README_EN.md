@@ -6,176 +6,213 @@
 [![PWA Ready](https://img.shields.io/badge/PWA-Standalone%20App-5A0FC8.svg?logo=pwa&logoColor=white)](https://web.dev/progressive-web-apps/)
 [![Tailscale](https://img.shields.io/badge/Network-Tailscale%20%2F%20LAN-black.svg?logo=tailscale&logoColor=white)](https://tailscale.com/)
 
-> **Lightweight Mobile PWA Gateway for Xiaomi MiMo Desktop**.  
-> Solves the mobile accessibility limitation of the official desktop AI agent. Control your MiMo tasks remotely from your phone (iOS / Android) with zero external dependencies in pure Python.
+> **Lightweight mobile PWA gateway for Xiaomi MiMo Desktop.**  
+> Operate the MiMo agent on your computer from your phone — assign tasks, inspect artifacts, switch models, and monitor quota. Single-file pure Python, zero third-party dependencies.
 
 [中文文档 (Chinese Documentation)](./README.md)
 
 ---
 
-## 🛠️ Problems Solved
+## 🛠️ The Problem We Solve
 
-Xiaomi MiMo only provides a desktop client (macOS). Once developers leave their workstation, they cannot check task progress or dispatch urgent tasks.
+Xiaomi MiMo officially ships only a desktop client. Once you leave your machine, you cannot track agent progress or dispatch urgent work.
 
-By reverse-engineering the desktop application's internal runtime mechanics, this gateway provides an uninvasive local bridge that enables:
-1. **Full Mobile Control**: Assign tasks, inspect code changes, and review live agent outputs from any smartphone.
-2. **Autonomous Execution Without Pop-ups**: Automatically authorizes execution permissions, allowing CLI tools and terminal scripts to run autonomously without requiring desktop confirmation.
-3. **Bidirectional State Sync**: Automatically inherits active session focus, working directory, and conversation history directly from your Mac.
-4. **Standalone App Experience**: Installs as an address-bar-free native PWA with speech-to-text dictation and image attachment uploads.
+This project reverse-engineers the client's local runtime surface and exposes a **non-invasive local gateway** that enables:
+1. **Full mobile control** — send requirements, browse code/file artifacts, dispatch long-running tasks.
+2. **Hands-free remote execution** — tool calls and shell commands run silently on the desktop without clicking approval dialogs.
+3. **True desktop state sync** — the phone inherits the currently focused session and working directory in real time.
+4. **Native app experience** — installable standalone PWA, voice input, image upload.
+5. **Full model matrix** — dynamic catalog aggregation, mobile bottom-sheet picker, alias normalization, preference write-back.
 
 ---
 
-## 🏗️ Technical Architecture: 6 Local Integration Touchpoints
+## 🏗️ Architecture: 6 Desktop Integration Points
 
-The gateway does not patch binaries. Instead, it hooks into 6 key local runtime artifacts maintained by the desktop app:
+No binary patching. The gateway transparently proxies six local data sources:
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│             Mobile PWA (iOS Safari / Android Chrome)   │
-│    (Tailscale HTTPS / Local Wi-Fi Network)             │
+│               Mobile PWA (iOS Safari / Android Chrome) │
+│     (Tailscale HTTPS / LAN Wi-Fi direct access)        │
 └───────────────────────────┬────────────────────────────┘
-                            │  SSE Stream / REST API
+                            │  SSE stream / REST API
                             ▼
 ┌────────────────────────────────────────────────────────┐
-│             mimo-pwa Gateway (server.py)               │
-│         (Listening 0.0.0.0:8080, Pure Python Standard) │
+│             mimo-pwa gateway (server.py)               │
+│        (listens on 0.0.0.0:8080, pure Python)          │
 └───────────┬───────────────────────────────┬────────────┘
             │                               │
-            ▼ Local API Calls               ▼ Direct File & DB Read/Write
+            ▼ Desktop API                   ▼ Local state read/write
 ┌───────────────────────────┐   ┌────────────────────────────────┐
-│  Xiaomi MiMo Desktop Core │   │     Local Runtime Storage      │
-│  (Internal dynamic port)  │   │                                │
-│                           │   │ 1. desktop-api.json (Port/Auth)│
+│  Xiaomi MiMo Desktop core │   │   Local configs & databases    │
+│  (port in desktop-api.json)│   │                                │
+│                           │   │ 1. desktop-api.json (creds)    │
 │ • POST /v1/sessions/turns │   │ 2. mimocode.db (SQLite)        │
-│ • GET  /v1/sessions/events│   │ 3. composer-input.json (Focus) │
-│ • POST /v1/sessions/abort │   │ 4. preferences.json (Models)   │
-│ • GET  /v1/tools          │   │ 5. Electron LevelDB (Settings) │
-│                           │   │ 6. Cookies.db (SSO Quota API)  │
+│ • GET  /v1/sessions/events│   │ 3. composer-input.json (focus) │
+│ • POST /v1/sessions/abort │   │ 4. preferences.json (models)   │
+│ • GET  /v1/tools          │   │ 5. Electron LevelDB (avatar)   │
+│                           │   │ 6. Cookies.db (SSO quota)      │
 └───────────────────────────┘   └────────────────────────────────┘
 ```
 
-| Integration Touchpoint | Local Path / Protocol | Mechanism & Practical Utility |
+| Integration point | Local path / protocol | Purpose |
 | :--- | :--- | :--- |
-| **1. Dynamic Credentials** | macOS: `~/Library/Application Support/Xiaomi MiMo/desktop-api.json`<br>Linux: `~/.config/XiaomiMiMoDesktop/desktop-api.json` | The desktop core starts on an ephemeral port. The gateway extracts the dynamic `port` and Bearer `token` automatically. |
-| **2. Session & History DB**| `~/.local/share/mimocode/mimocode.db` (SQLite) | Direct SQLite integration: auto-inherits the workspace directory (`~`) and titles sessions based on first prompt. |
-| **3. Active Focus Linkage**| `composer-input.json` under the data dir above | Reads user's active session on desktop (`activeSessionId`), automatically opening the current desktop task on mobile. |
-| **4. Model Persistence**   | `preferences.json` under the data dir above | Directly updates persistent configuration when toggling models from mobile. |
-| **5. Desktop Avatar Sync** | `Local Storage/leveldb` under the data dir above | Decodes `mimo.set.avatar` from LevelDB to render custom user avatars in the mobile drawer. |
-| **6. Weekly Quota Tracking**| `Partitions/xiaomi-account/Cookies` under the data dir above | Reads Xiaomi SSO `passToken` to query remaining weekly quota percentage and reset schedules. |
-
-> On startup the gateway auto-detects the data directory by preferring the path that contains `desktop-api.json`, so both macOS and Linux layouts work out of the box.
+| **1. Dynamic credentials** | macOS: `~/Library/Application Support/Xiaomi MiMo/desktop-api.json`<br>Linux: `~/.config/XiaomiMiMoDesktop/desktop-api.json` | Auto-extract random port + Bearer token for password-less reverse proxy. |
+| **2. Session store** | `~/.local/share/mimocode/mimocode.db` | Create sessions in SQLite, inherit cwd, auto-rename from first message. |
+| **3. Desktop focus** | `composer-input.json` | Track the active desktop session; phone opens on the same task. |
+| **4. Model write-back** | `preferences.json` | Mobile model switch persists globally and per session. |
+| **5. Real avatar** | `Local Storage/leveldb` | Parse `mimo.set.avatar` and show the signed-in user avatar. |
+| **6. Weekly quota** | `Partitions/xiaomi-account/Cookies` | Extract Xiaomi SSO `passToken`, query remaining quota & reset countdown. |
 
 ---
 
-## ⚡ Core Engineering Capabilities
+## ⚡ Core Capabilities
 
-### 1. 1,000,000 Token Native Context & Live Token HUD
-- **1M Context Limit**: Decoded from client's internal configuration (`limit: { context: 1e6 }`). Full 1M token support for proprietary MiMo models.
-- **Dynamic Circular Progress HUD**: Header HUD displays token count, remaining percentage, and Prompt Cache Hit Rate in real time.
+### 1. Native 1M Context & Live Token HUD
+- **1,000,000-token context** aligned with MiMo's internal `limit.context = 1e6`.
+- Ring HUD shows total tokens used, remaining %, and prompt-cache hit rate.
 
-### 2. Full Official Model Matrix
-| Model ID | Backend Identifier | Compute Multiplier | Recommended Use Case |
-| :--- | :--- | :---: | :--- |
-| **MiMo Auto** | `mimo-auto` | 1.0x | Default intelligent routing according to task complexity |
-| **MiMo-X-Pro-Preview** | `mimo-x-pro-preview` | 1.0x | Flagship reasoning for system architecture and large-scale refactors |
-| **MiMo-X-Flash-Preview**| `mimo-x-flash-preview` | 0.4x | Lightweight, low-latency interactions and quick edits |
+### 2. Dynamic Multi-Source Model Engine
+Models are **not hard-coded**. The catalog is assembled at runtime from:
 
-### 3. Dual-Channel High Availability (SSE + Polling Watchdog)
-- **Millisecond Typewriter Streaming**: Direct pass-through of `/v1/sessions/{id}/events` SSE stream with structured tool invocation cards (Bash, Edit, Grep, Read).
-- **Mobile Sleep & Lock Protection**: Integrated 1.5s polling fallback prevents hung connections or dropped messages when switching apps.
+| Source | Role |
+| :--- | :--- |
+| `model-catalog.json` | Official quota, cost multipliers, context windows |
+| `models.dev` cache / extended config | Claude, DeepSeek, other extended models |
+| `preferences.json` + session DB | Defaults, recents, per-session model |
 
-### 4. Autonomous Execution Authorization
-- Tasks sent from mobile default to `perm: "完全访问权限"`, allowing CLI execution without requiring desktop confirmation.
+**Canonical ID mapping** normalizes historical aliases:
 
-### 5. Zero Dependencies (Pure Python)
-- Single-file architecture implemented exclusively with Python standard libraries (`http.server`, `sqlite3`, `urllib`, `struct`, `zlib`, etc.).
-- No `pip install`, no node build steps, instant deployment.
+| Alias / legacy | Canonical ID |
+| :--- | :--- |
+| `mimo-pro` / `mimo-x-pro-preview` | `mimo-v2.6-pro` |
+| `mimo-flash` / `mimo-x-flash-preview` | `mimo-v2.6-flash` |
+| `mimo-auto` | `mimo-auto` |
+
+**Mobile bottom-sheet selector** supports category filters, capability badges, context size and cost multiplier. Selections write back to desktop preferences and session maps.
+
+Typical catalog (live, may grow):
+- **MiMo Auto** — free adaptive router
+- **MiMo-V2.6-Pro / UltraSpeed / Flash** — current flagship line
+- **MiMo-V2.5 / V2.5-Pro / UltraSpeed** — previous flagship
+- **MiMo-V2-Pro / V2-Flash / V2-Omni** — multimodal & lite
+- **Claude Sonnet 4.5 / 4.6, DeepSeek V4 Pro** — extended compute
+
+### 3. Dual-Channel Streaming (SSE + Polling Watchdog)
+- Millisecond SSE typewriter stream via `/v1/sessions/{id}/events` with Thinking + tool cards.
+- 1.5s polling watchdog recovers missed fragments after mobile backgrounding / lock screen.
+- Persistent "working" motion, elapsed timer, and live badges so running tasks never look stuck.
+
+### 4. Remote Execution Without Prompt Walls
+Mobile turns default to `perm: "完全访问权限"` so shell and tools execute without desktop-side approval clicks.
+
+### 5. Artifacts / Plugins / Quota Panel
+- Auto-classified artifact browser (code, docs, images) with preview and download.
+- Toggle Desktop-installed skills/plugins (arxiv, deep-research, …).
+- Weekly remaining compute % and reset countdown.
+
+### 6. Zero External Dependencies
+Single-file stdlib Python (`http.server`, `sqlite3`, `urllib`, `zlib`, …). Optional local vendor JS (`marked`, `prism`) keeps Markdown offline-capable. No `pip install` required.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Run the Gateway
-Ensure **Xiaomi MiMo Desktop** is running, then start the gateway:
+### 1. Start the gateway
+Keep **Xiaomi MiMo Desktop** running, then:
 
 ```bash
 git clone https://github.com/Nelson-zhou/mimo-pwa.git
 cd mimo-pwa
 
-# Option A: one-click script (auto-picks a free port, for testing & debugging)
+# A) Quick start (auto-increments port if occupied)
 ./start.sh
 
-# Option B: persistent systemd service (Recommended for Linux: auto-start on boot & crash recovery)
+# B) Systemd user service (recommended on Linux)
 ./install-service.sh
-# or customize the port
-PORT=8081 ./install-service.sh
+PORT=8081 ./install-service.sh   # optional custom port
 
-# Option C: direct start (listens on 0.0.0.0:8080 by default)
+# C) Direct launch (default 0.0.0.0:8080)
 python3 server.py
 ```
 
-If port 8080 is already taken (e.g. by qBittorrent), the gateway automatically tries the next free port, or you can pin one:
+If 8080 is taken (e.g. by qBittorrent), the gateway picks the next free port, or set one:
 
 ```bash
 PORT=8081 ./start.sh
-# or
 python3 server.py --port 8081
 ```
 
-#### 💡 Systemd Service Management
-When installed as a persistent user service, you can manage it anytime:
-- **Check Status**: `systemctl --user status mimo-pwa`
-- **Follow Logs**: `journalctl --user -u mimo-pwa -f`
-- **Restart Service**: `systemctl --user restart mimo-pwa`
-- **Stop Service**: `systemctl --user stop mimo-pwa`
-- **Uninstall Service**: `./uninstall-service.sh`
+#### Systemd management
+- Status: `systemctl --user status mimo-pwa`
+- Logs: `journalctl --user -u mimo-pwa -f`
+- Restart: `systemctl --user restart mimo-pwa`
+- Stop: `systemctl --user stop mimo-pwa`
+- Uninstall: `./uninstall-service.sh`
 
+### 2. Remote network access
 
-### 2. Network Access
-
-#### Option A: Tailscale Serve (Recommended for Remote Access)
-Exposes an official HTTPS certificate required for standalone PWA installation:
-
+#### Option A: Tailscale HTTPS (recommended)
 ```bash
-# Enable HTTPS forwarding on port 8443 (use your actual gateway port)
+# Map once; replace 8080 with your actual gateway port
 tailscale serve --https=8443 --bg 8080
 ```
+The gateway only surfaces an install link when `tailscale serve` forwards HTTPS to the live gateway port.
 
-The gateway auto-detects your Tailscale MagicDNS hostname and only advertises an HTTPS install URL when `tailscale serve status` actually forwards to the current gateway port. If none exists yet, run `tailscale serve` first (use your real gateway port, e.g. 8081).
+#### Option B: LAN Wi-Fi
+Open the LAN IP printed in the terminal (e.g. `http://192.168.x.x:8080`) on your phone.
 
-#### Option B: Local Wi-Fi
-Connect phone and computer to the same Wi-Fi, and open `http://<LAN_IP>:8080` (or the auto-selected port).
-
-### 3. Add to Home Screen
-- **iOS (Safari)**: Tap Share ➔ Tap **Add to Home Screen**.
-- **Android (Chrome)**: Tap menu ➔ Tap **Install App** / **Add to Home Screen**.
+### 3. Install to home screen
+- **iOS Safari**: Share → **Add to Home Screen**
+- **Android Chrome**: Menu → **Install app** / **Add to Home screen**
 
 ---
 
-## ⚙️ Command Line Options
+## 🧪 Tests & Regression Guards
+
+```bash
+# 1) Model mapping / session-model unit tests
+python3 -m unittest tests.test_model_mapping -v
+
+# 2) Embedded PWA JS syntax & safety guards (includes node --check)
+python3 -m unittest tests.test_pwa_syntax -v
+
+# 3) Live E2E (gateway must be running; includes headless Chrome render)
+python3 -m unittest tests.test_pwa_live_e2e -v
+
+# Everything
+python3 -m unittest discover -s tests -v
+```
+
+| Suite | Covers |
+| :--- | :--- |
+| `tests/test_model_mapping.py` | Canonical ID normalization, extended models, context limits, session model resolution |
+| `tests/test_pwa_syntax.py` | Inline JS syntax, async `initApp`, global error boundary, safetyTimer anti-stall |
+| `tests/test_pwa_live_e2e.py` | HTTP root reachability, clean script evaluation, headless Chrome render |
+
+---
+
+## ⚙️ CLI Flags
 
 ```text
 Usage: python3 server.py [options]
 
-Options:
-  --port PORT       Gateway listen port (default: 8080; auto-increments if occupied)
-  --host HOST       Interface IP to bind (default: 0.0.0.0)
-  --workdir DIR     Default workspace directory for new sessions (default: ~)
+  --port PORT     Listen port (default: 8080; auto-increments if busy)
+  --host HOST     Bind address (default: 0.0.0.0)
+  --workdir DIR   Default working directory for new sessions (default: ~)
 ```
 
 ---
 
-## 🛡️ Security & Privacy Guard
+## 🛡️ Security & Privacy Guardrails
 
-This repository enforces strict security and privacy standards. For detailed rules and checklists, please refer to [**SECURITY_GUARD.md**](./SECURITY_GUARD.md).
-
-To prevent accidental leaks of personal privacy (UIDs, cookies, private Tailnet hostnames, local paths) or illegal contents, you can activate the local pre-commit guard:
+See [**SECURITY_GUARD.md**](./SECURITY_GUARD.md) for the full policy (UID, cookies, Tailnet hostnames, local paths, etc.).
 
 ```bash
-# Install git pre-commit security hook
+# Install pre-commit interceptor
 ./scripts/install-hooks.sh
 
-# Run security and compliance scan manually
+# Manual compliance scan (run before every commit)
 ./scripts/security-check.sh
 ```
 
@@ -183,4 +220,4 @@ To prevent accidental leaks of personal privacy (UIDs, cookies, private Tailnet 
 
 ## 📄 License
 
-Distributed under the [MIT License](./LICENSE).
+Released under the [MIT License](./LICENSE).

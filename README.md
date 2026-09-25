@@ -22,6 +22,7 @@ Xiaomi MiMo 官方仅提供 macOS / 桌面客户端，开发者离开电脑后�
 2. **免确认远程自主执行**：自动放行执行权限，工具链与终端命令在电脑端静默执行，无需回到电脑前点击授权弹窗。
 3. **真实桌面状态双向同步**：手机端直接继承电脑端当前选中的会话与工作目录，两端状态实时保持一致。
 4. **原生 App 级使用体验**：支持安装为无浏览器边框的独立 PWA 应用，支持语音输入、图片上传。
+5. **全矩阵模型切换**：动态聚合官方模型目录，手机端底部抽屉一键切换，别名自动归一化并回写桌面配置。
 
 ---
 
@@ -73,23 +74,52 @@ Xiaomi MiMo 官方仅提供 macOS / 桌面客户端，开发者离开电脑后�
 - **1,000,000 Token 上下文支持**：对齐 MiMo 内部配置（`limit: { context: 1e6 }`），自有模型完全解锁 1M 上下文。
 - **实时环形进度 HUD**：顶栏动态计算并显示当前会话消耗的 Token 总量、剩余百分比、Prompt 缓存命中率（Cache Hit Rate）。
 
-### 2. 官方大模型全矩阵支持
-| 模型标识 | 对应后端参数 | 算力消耗 | 定位与特性 |
-| :--- | :--- | :---: | :--- |
-| **MiMo Auto** | `mimo-auto` | 1.0x | 官方推荐，自动根据任务复杂度路由调度 |
-| **MiMo-X-Pro-Preview** | `mimo-x-pro-preview` | 1.0x | 旗舰级推理，针对大型架构、深度算法与复杂代码重构 |
-| **MiMo-X-Flash-Preview**| `mimo-x-flash-preview` | 0.4x | 极速响应，针对日常轻量编辑与即时问答 |
+### 2. 动态多源模型引擎（100% 动态目录）
+模型不再写死为固定三档，而是**多源实时聚合**后统一归一化展示：
+
+| 数据源 | 作用 |
+| :--- | :--- |
+| `model-catalog.json`（与数据目录同级） | 官方云端账户配额、算力倍率、上下文窗口 |
+| `models.dev` 本地缓存 / 拓展配置 | 拓展模型（Claude、DeepSeek 等）元数据 |
+| `preferences.json` + 历史会话库 | 当前默认模型、最近使用、会话级模型 |
+
+**全链路规范 ID 映射（Canonical Mapping）**  
+历史别名与旧 preview 标识会自动归一到当前规范 ID，例如：
+
+| 历史 / 别名 | 规范 ID |
+| :--- | :--- |
+| `mimo-pro` / `mimo-x-pro-preview` / `xiaomi/mimo-x-pro-preview` | `mimo-v2.6-pro` |
+| `mimo-flash` / `mimo-x-flash-preview` | `mimo-v2.6-flash` |
+| `mimo-auto` / `mimo/mimo-auto` | `mimo-auto` |
+
+**手机端底部抽屉选择器（Bottom Sheet）**  
+支持分类过滤、特性徽标、上下文容量与算力倍率展示；选择后立即回写 `preferences.json` 与会话级模型映射，桌面端与手机端保持一致。
+
+当前动态目录可稳定解析到 10+ 模型（以本机实时目录为准），覆盖：
+
+- **MiMo Auto** — 官方自适应路由，免费调度
+- **MiMo-V2.6-Pro / V2.6-Pro-UltraSpeed / V2.6-Flash** — 最新自研旗舰与极速档
+- **MiMo-V2.5 / V2.5-Pro / V2.5-Pro-UltraSpeed** — 上一代旗舰
+- **MiMo-V2-Pro / V2-Flash / V2-Omni** — 多模态与轻量档
+- **Claude Sonnet 4.5 / 4.6、DeepSeek V4 Pro** — 拓展算力
 
 ### 3. 双通道通信高可用架构 (SSE + 轮询看门狗)
 - **毫秒级 SSE 打字机流**：直通底层 `/v1/sessions/{id}/events`，结构化输出思考过程（Thinking）与工具调用卡片（Bash、Edit、Grep、Read）。
 - **锁屏/切后台防丢失保障**：移动端切后台容易导致 TCP 连接挂起，网关集成 1.5s 智能轮询看门狗，亮屏瞬间秒级补全错过的消息片段。
+- **任务进行中持续动效**：会话列表与顶栏同步展示「工作中」状态、耗时与呼吸光点，避免误判任务卡死。
 
 ### 4. 远程执行免授权
 - 手机端发起的任务默认携带 `perm: "完全访问权限"`，终端命令自动放行，无需电脑前二次点击弹窗确认。
 
-### 5. 零外部依赖 (Pure Python)
+### 5. 产物 / 插件 / 配额一体化面板
+- **产物浏览**：自动按代码、文档、图片分类扫描工作区产物，支持在线预览与下载。
+- **插件开关**：读取并启停 Desktop 已安装的 Skill / 插件（arxiv、deep-research 等）。
+- **周配额监控**：实时展示本周剩余算力百分比与重置倒计时。
+
+### 6. 零外部依赖 (Pure Python)
 - 单文件架构，完全使用 Python 3 标准库（`http.server`、`sqlite3`、`urllib`、`struct`、`zlib` 等）。
 - 无需执行 `pip install`，无外部轮子与 node 构建环境，拷走即跑。
+- Markdown / 代码高亮依赖可选本地 vendor（`assets/vendor/marked.min.js`、`prism.min.js`），离线可用。
 
 ---
 
@@ -148,10 +178,37 @@ tailscale serve --https=8443 --bg 8080
 手机与电脑连接同一 Wi-Fi，手机浏览器直接访问终端输出的局域网 IP（如 `http://192.168.x.x:8080`）。
 
 ### 3. 安装到手机桌面
+
 - **iOS (Safari)**：点击底部【分享】按钮 ➔ 选择【添加到主屏幕】。
 - **Android (Chrome)**：点击地址栏右侧菜单 ➔ 选择【安装应用】或【添加到主屏幕】。
 
 添加后即可作为完全独立的 App 运行，无任何浏览器网址栏与外框干扰。
+
+---
+
+## 🧪 测试与回归守卫
+
+项目内置三层自动化测试，提交前建议全部跑通：
+
+```bash
+# 1) 模型映射 / 会话感知单元测试
+python3 -m unittest tests.test_model_mapping -v
+
+# 2) PWA 内嵌脚本语法与安全兜底检查（含 node --check）
+python3 -m unittest tests.test_pwa_syntax -v
+
+# 3) 在线 E2E 回归（需网关正在运行，含无头浏览器渲染检查）
+python3 -m unittest tests.test_pwa_live_e2e -v
+
+# 一次跑完
+python3 -m unittest discover -s tests -v
+```
+
+| 测试套件 | 覆盖范围 |
+| :--- | :--- |
+| `tests/test_model_mapping.py` | 规范 ID 归一化、拓展模型、上下文窗口、会话级模型解析 |
+| `tests/test_pwa_syntax.py` | 内嵌 JS 语法、`initApp` 异步约定、error 兜底、safetyTimer 防卡死 |
+| `tests/test_pwa_live_e2e.py` | HTTP 根路径可达、脚本运行时干净求值、无头 Chrome 真实渲染 |
 
 ---
 
@@ -181,6 +238,8 @@ tailscale serve --https=8443 --bg 8080
 # 手动执行安全合规扫描
 ./scripts/security-check.sh
 ```
+
+**提交前强制建议**：执行 `./scripts/security-check.sh`，确保无敏感信息泄漏后再 `git commit`。
 
 ---
 
