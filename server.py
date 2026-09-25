@@ -719,6 +719,193 @@ def set_current_perm(perm_value: str, session_id: Optional[str] = None) -> bool:
     return True
 
 
+def get_current_think() -> str:
+    """读取桌面端 preferences.json 的 think（深度思考）配置"""
+    if os.path.exists(PREFERENCES_PATH):
+        try:
+            with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
+                p = json.load(f)
+                v = p.get("think", "")
+                return v if isinstance(v, str) else ""
+        except Exception:
+            pass
+    return ""
+
+
+def set_current_think(think_value: str) -> bool:
+    """同步桌面端 think 配置（"" 关闭 / "think" 开启 / "extra" 更深）"""
+    allowed = ("", "think", "extra")
+    if think_value not in allowed:
+        return False
+    if not os.path.exists(PREFERENCES_PATH):
+        return False
+    try:
+        with open(PREFERENCES_PATH, "r", encoding="utf-8") as f:
+            p = json.load(f)
+        p["think"] = think_value
+        with open(PREFERENCES_PATH, "w", encoding="utf-8") as f:
+            json.dump(p, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print("Error updating preferences.json think:", e)
+        return False
+
+
+def list_recent_dirs(limit: int = 24) -> List[Dict[str, Any]]:
+    """汇总桌面端最近工作目录（session.directory + convoMeta + 项目目录），用于目录切换"""
+    seen = {}
+    def _add(d: str, source: str = "") -> None:
+        if not d:
+            return
+        d = os.path.expanduser(d)
+        if not os.path.isabs(d) or not os.path.isdir(d):
+            return
+        d = os.path.realpath(d)
+        if d not in seen:
+            seen[d] = {"path": d, "name": os.path.basename(d) or d, "source": source}
+
+    _add(DEFAULT_WORKDIR, "home")
+    proj_root = os.path.expanduser("~/XiaomiMiMoProjects")
+    if os.path.isdir(proj_root):
+        for name in sorted(os.listdir(proj_root)):
+            p = os.path.join(proj_root, name)
+            if os.path.isdir(p) and not name.startswith("."):
+                _add(p, "project")
+
+    if os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+            rows = conn.execute(
+                "SELECT directory FROM session WHERE directory IS NOT NULL AND directory != '' "
+                "ORDER BY time_updated DESC LIMIT 40"
+            ).fetchall()
+            conn.close()
+            for (d,) in rows:
+                _add(d, "session")
+        except Exception:
+            pass
+
+    if os.path.exists(COMPOSER_INPUT_PATH):
+        try:
+            with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            meta = data.get("convoMeta") or {}
+            if isinstance(meta, dict):
+                for item in meta.values():
+                    if isinstance(item, dict):
+                        _add(item.get("directory"), "composer")
+        except Exception:
+            pass
+
+    items = list(seen.values())
+    home = os.path.realpath(os.path.expanduser("~"))
+    items.sort(key=lambda x: (0 if x["path"] == home else 1, x["path"]))
+    return items[:limit]
+
+
+def rename_session(session_id: str, title: str) -> bool:
+    """重命名会话标题（本地 DB + 桌面 composer 焦点同步）"""
+    title = (title or "").strip()[:80]
+    if not session_id or not title:
+        return False
+    ok = False
+    if os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=5)
+            c = conn.cursor()
+            c.execute(
+                "UPDATE session SET title = ?, time_updated = ? WHERE id = ?",
+                (title, int(time.time() * 1000), session_id),
+            )
+            conn.commit()
+            ok = c.rowcount > 0
+            conn.close()
+        except Exception as e:
+            print("Error rename session:", e)
+    return ok
+
+
+def update_session_directory(session_id: str, directory: str) -> bool:
+    """切换会话工作目录，并同步桌面 composer convoMeta"""
+    directory = os.path.expanduser((directory or "").strip())
+    if not session_id or not directory or not os.path.isdir(directory):
+        return False
+    directory = os.path.realpath(directory)
+    ok = False
+    if os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=5)
+            c = conn.cursor()
+            c.execute(
+                "UPDATE session SET directory = ?, time_updated = ? WHERE id = ?",
+                (directory, int(time.time() * 1000), session_id),
+            )
+            conn.commit()
+            ok = c.rowcount > 0
+            conn.close()
+        except Exception as e:
+            print("Error update session directory:", e)
+    if os.path.exists(COMPOSER_INPUT_PATH):
+        try:
+            with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            meta = data.get("convoMeta") or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            meta[session_id] = {
+                "project": os.path.basename(directory) or "workspace",
+                "directory": directory,
+            }
+            data["convoMeta"] = meta
+            with open(COMPOSER_INPUT_PATH, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception:
+            pass
+    return ok
+
+
+def get_composer_draft(session_id: str) -> str:
+    """读取与桌面端共享的输入草稿（composer-input.json drafts）"""
+    if not session_id or not os.path.exists(COMPOSER_INPUT_PATH):
+        return ""
+    try:
+        with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        drafts = data.get("drafts") or {}
+        if isinstance(drafts, dict):
+            v = drafts.get(session_id, "")
+            return v if isinstance(v, str) else ""
+    except Exception:
+        pass
+    return ""
+
+
+def set_composer_draft(session_id: str, text: str) -> bool:
+    """写入与桌面端共享的输入草稿，实现手机/电脑无缝续写"""
+    if not session_id:
+        return False
+    try:
+        data = {}
+        if os.path.exists(COMPOSER_INPUT_PATH):
+            with open(COMPOSER_INPUT_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        drafts = data.get("drafts") or {}
+        if not isinstance(drafts, dict):
+            drafts = {}
+        if text:
+            drafts[session_id] = text
+        else:
+            drafts.pop(session_id, None)
+        data["drafts"] = drafts
+        data["currentKey"] = session_id
+        with open(COMPOSER_INPUT_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print("Error saving composer draft:", e)
+        return False
+
+
 
 def categorize_artifact(ext: str) -> Tuple[str, str]:
     """根据后缀返回分类 (doc, app, other) 与徽章名称"""
@@ -1561,6 +1748,88 @@ def get_session_context_data(sid: str) -> Dict[str, Any]:
     return res
 
 
+MIMO_LOG_DIRS = [
+    os.path.expanduser("~/.local/share/mimocode/log"),
+    os.path.join(MIMO_DATA_DIR, "logs"),
+]
+
+
+def detect_runner_reentry(sid: str, within_seconds: int = 600, anchor_ms: Optional[int] = None) -> bool:
+    """扫描 MiMo 引擎日志，检测 runner-reentry（会话 runner 卡死、新消息被静默排队）。
+    anchor_ms: 本轮用户消息落库时间(ms)；只认该时刻之后新产生的 reentry 事件，避免历史误报。"""
+    if not sid:
+        return False
+    files: List[str] = []
+    for d in MIMO_LOG_DIRS:
+        if os.path.isdir(d):
+            try:
+                names = [n for n in os.listdir(d) if ".log" in n]
+                names.sort(key=lambda n: os.path.getmtime(os.path.join(d, n)), reverse=True)
+                files = [os.path.join(d, n) for n in names][:3]
+            except Exception:
+                pass
+            if files:
+                break
+    now = time.time()
+    offset = time.mktime(time.localtime()) - time.mktime(time.gmtime())
+    anchor_s = (anchor_ms or 0) / 1000.0 - 2
+    for path in files:
+        try:
+            if now - os.path.getmtime(path) > within_seconds:
+                continue
+            size = os.path.getsize(path)
+            with open(path, "rb") as f:
+                if size > 512 * 1024:
+                    f.seek(size - 512 * 1024)
+                blob = f.read().decode("utf-8", errors="ignore")
+            pat = re.compile(
+                r"^(\S+)\s.*label=" + re.escape(sid) + r"(?::|\s).*runner-reentry",
+                re.M,
+            )
+            for m in pat.finditer(blob):
+                try:
+                    t_local = time.mktime(time.strptime(m.group(1)[:19], "%Y-%m-%dT%H:%M:%S"))
+                except Exception:
+                    return True
+                # 日志时间戳存在本地/UTC 两种落法：任一解释满足「不早于锚点且不早于窗口」即判定卡死
+                for cand in (t_local, t_local - offset):
+                    if cand > now + 120:
+                        cand = now
+                    if cand >= anchor_s and now - cand <= within_seconds:
+                        return True
+        except Exception:
+            continue
+    return False
+
+
+def is_session_wedged(sid: str) -> bool:
+    """卡死判定（空闲态证据）：引擎 DB 无进行中的回合，但 10 分钟内该会话刚记录过 runner-reentry，
+    且最后一条助手回合早于该 reentry —— 说明有消息被静默吞掉/排队永不执行。
+    引擎真在跑长任务时 is_busy 为 True，本函数返回 False，不误判。"""
+    status = get_session_turn_status(sid)
+    if status.get("is_busy"):
+        return False
+    return detect_runner_reentry(sid, within_seconds=600, anchor_ms=0)
+
+
+def get_last_user_message_time(sid: str) -> int:
+    """会话最后一条用户消息落库时间(ms)，用于 reentry 判定锚点。"""
+    if not sid or not os.path.exists(MIMO_DB_PATH):
+        return 0
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        c = conn.cursor()
+        c.execute(
+            "SELECT time_created FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user' ORDER BY time_created DESC LIMIT 1",
+            (sid,),
+        )
+        row = c.fetchone()
+        conn.close()
+        return int(row[0]) if row else 0
+    except Exception:
+        return 0
+
+
 def get_session_turn_status(sid: str) -> Dict[str, Any]:
     """
     精确检查指定会话当前的真实工作状态与当前任务轮次（Turn）的真实开始时间戳。
@@ -2047,7 +2316,7 @@ PWA_MANIFEST_JSON = json.dumps(
 )
 
 PWA_SERVICE_WORKER_JS = """
-const CACHE_NAME = 'mimo-pwa-v19';
+const CACHE_NAME = 'mimo-pwa-v26';
 const PRECACHE = [
   '/',
   '/index.html',
@@ -2316,6 +2585,40 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     .btn-new-task-top:active {
       background: #E5E7EB;
     }
+
+    .btn-workdir-top {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      max-width: 150px;
+      background: #F3F4F6;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 5px 10px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .btn-workdir-top:active { background: #E5E7EB; }
+    .btn-workdir-top svg { flex: 0 0 auto; }
+    .btn-workdir-top #workdir-name-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .btn-load-earlier {
+      background: #F3F4F6;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 7px 14px;
+      font-size: 12.5px;
+      font-weight: 500;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .btn-load-earlier:active { background: #E5E7EB; }
 
     /* 抽屉式侧边栏 */
     .drawer-overlay {
@@ -4279,6 +4582,48 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       justify-content: space-between;
       flex-shrink: 0;
     }
+    .model-sheet-footer.model-footer-stack {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 12px;
+    }
+    .think-mode-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .think-mode-label {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .think-mode-hint { font-size: 11px; font-weight: 400; color: var(--text-muted); }
+    .think-seg {
+      display: inline-flex;
+      background: #F3F4F6;
+      border: 1px solid var(--border-subtle);
+      border-radius: 8px;
+      padding: 2px;
+      gap: 2px;
+    }
+    .think-seg-btn {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 500;
+      padding: 5px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .think-seg-btn.active {
+      background: var(--mimo-orange);
+      color: #fff;
+    }
     .model-default-toggle-label {
       display: inline-flex;
       align-items: center;
@@ -4926,6 +5271,10 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-right">
       <span class="conn-dot desktop-only" id="conn-dot" title="与电脑端连接状态"></span>
+      <button class="btn-workdir-top" id="dock-workdir-btn" title="切换工作目录" onclick="toggleWorkdirSheet(true)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        <span id="workdir-name-label">工作目录</span>
+      </button>
       <button class="btn-new-task-top" title="新建任务 (Ctrl+N)" onclick="triggerNewSession()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         <span>新建</span>
@@ -5071,7 +5420,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         <span class="voice-cue-dot"></span>
         <span id="voice-cue-text">🎙️ 正在聆听中... 请说话 (再次点击麦克风结束)</span>
       </div>
-      <textarea id="dock-input" rows="1" placeholder="描述任务，输入/调用技能..." oninput="autoGrow(this)"></textarea>
+      <textarea id="dock-input" rows="1" placeholder="描述任务，输入/调用技能 · Enter 发送，Shift+Enter 换行" oninput="autoGrow(this)"></textarea>
       <input type="file" id="dock-file-input" multiple accept="image/*,.pdf,.txt,.md,.py,.js,.html,.json,.docx,.xlsx,.pptx" style="display:none;" onchange="handleFileInputChange(event)">
       
       <div class="dock-controls-bar">
@@ -5079,7 +5428,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           <button class="btn-dock-icon" title="添加图片或文件" onclick="document.getElementById('dock-file-input').click()">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
           </button>
-          
+
           <div class="dock-perm-badge amber" id="dock-perm-btn" title="切换审批权限" onclick="togglePermSheet(true)">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
             <span id="perm-name-label">完全访问 ▾</span>
@@ -5128,6 +5477,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
               <div class="model-popover-list" id="model-popover-list">
                 <div style="padding:12px 8px; text-align:center; color:var(--text-muted); font-size:11.5px;">正在同步模型列表...</div>
               </div>
+              <div class="think-mode-row" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border-light);">
+                <span class="think-mode-label">💭 深度思考 <span class="think-mode-hint" id="think-mode-hint-pop">关闭</span></span>
+                <div class="think-seg" role="group" aria-label="深度思考模式">
+                  <button type="button" class="think-seg-btn" data-think-mode="" onclick="setThinkMode('')">关闭</button>
+                  <button type="button" class="think-seg-btn" data-think-mode="think" onclick="setThinkMode('think')">开启</button>
+                  <button type="button" class="think-seg-btn" data-think-mode="extra" onclick="setThinkMode('extra')">更深</button>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -5155,6 +5512,45 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       </div>
       <div id="perm-sheet-list" style="display:flex; flex-direction:column; gap:8px;">
         <div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px;">正在同步权限列表...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 工作目录选择弹层 -->
+  <div class="modal-sheet" id="workdir-sheet" onclick="toggleWorkdirSheet(false)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-title">
+        <div>
+          <span style="font-size:16px; font-weight:700;">📁 工作目录</span>
+          <div style="font-size:11.5px; color:var(--text-muted); margin-top:2px; font-weight:normal;">
+            任务会在该目录下执行，与电脑端 Desktop 保持一致
+          </div>
+        </div>
+        <button class="btn-icon" onclick="toggleWorkdirSheet(false)">✕</button>
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input type="text" id="workdir-custom-input" placeholder="输入绝对路径，如 /home/nelson/项目"
+               style="flex:1; padding:10px 12px; border:1px solid var(--border-subtle); border-radius:10px; font-size:13px; outline:none;">
+        <button class="btn-new-task-top" onclick="applyCustomWorkdir()">使用</button>
+      </div>
+      <div id="workdir-sheet-list" style="display:flex; flex-direction:column; gap:6px; max-height:46vh; overflow-y:auto;">
+        <div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px;">正在加载最近目录...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 会话重命名弹层 -->
+  <div class="modal-sheet" id="rename-sheet" onclick="toggleRenameSheet(false)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+      <div class="modal-title">
+        <span>重命名任务</span>
+        <button class="btn-icon" onclick="toggleRenameSheet(false)">✕</button>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <input type="text" id="rename-input" maxlength="80"
+               style="flex:1; padding:10px 12px; border:1px solid var(--border-subtle); border-radius:10px; font-size:13px; outline:none;"
+               onkeydown="if(event.key==='Enter') applyRenameSession()">
+        <button class="btn-new-task-top" onclick="applyRenameSession()">保存</button>
       </div>
     </div>
   </div>
@@ -5242,8 +5638,16 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         <div style="padding:20px; text-align:center; color:var(--text-muted); font-size:13px;">正在同步模型映射列表...</div>
       </div>
 
-      <!-- 底部默认配置开关 -->
-      <div class="model-sheet-footer">
+      <!-- 底部：深度思考 + 默认配置开关 -->
+      <div class="model-sheet-footer model-footer-stack">
+        <div class="think-mode-row">
+          <span class="think-mode-label">💭 深度思考 <span class="think-mode-hint" id="think-mode-hint">关闭</span></span>
+          <div class="think-seg" role="group" aria-label="深度思考模式">
+            <button type="button" class="think-seg-btn" data-think-mode="" onclick="setThinkMode('')">关闭</button>
+            <button type="button" class="think-seg-btn" data-think-mode="think" onclick="setThinkMode('think')">开启</button>
+            <button type="button" class="think-seg-btn" data-think-mode="extra" onclick="setThinkMode('extra')">更深</button>
+          </div>
+        </div>
         <label class="model-default-toggle-label">
           <input type="checkbox" id="chk-set-default-model" checked>
           <span>同步设为新建任务的默认模型</span>
@@ -5365,6 +5769,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         try {
           localStorage.setItem("mimo.draft." + (currentSessionId || "default"), input.value);
         } catch (_) {}
+        scheduleDraftSync();
       });
       document.getElementById("chat-viewport")?.addEventListener("scroll", function() {
         const btn = document.getElementById("scroll-bottom-btn");
@@ -5384,6 +5789,191 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       } catch (_) {}
     }
 
+    // ── 工作目录（桌面端同级体验） ───────────────────────────
+    let currentWorkdir = "";
+
+    function setWorkdirLabel(dir) {
+      currentWorkdir = dir || "";
+      const el = document.getElementById("workdir-name-label");
+      if (el) {
+        const name = dir ? (dir.split("/").filter(Boolean).pop() || dir) : "工作目录";
+        el.textContent = name;
+        el.title = dir || "工作目录";
+      }
+    }
+
+    function toggleWorkdirSheet(open) {
+      const sheet = document.getElementById("workdir-sheet");
+      if (!sheet) return;
+      if (open) {
+        loadWorkdirList();
+        sheet.classList.add("open");
+      } else {
+        sheet.classList.remove("open");
+      }
+    }
+
+    async function loadWorkdirList() {
+      const list = document.getElementById("workdir-sheet-list");
+      if (!list) return;
+      list.innerHTML = '<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:13px;">正在加载最近目录...</div>';
+      try {
+        const r = await fetch("/api/dirs");
+        const data = await r.json();
+        const dirs = data.dirs || [];
+        if (!dirs.length) {
+          list.innerHTML = '<div style="padding:16px; text-align:center; color:var(--text-dim); font-size:12px;">暂无最近目录</div>';
+          return;
+        }
+        list.innerHTML = dirs.map(d => `
+          <div class="session-item-row" style="display:flex;align-items:center;justify-content:space-between;gap:8px;"
+               onclick="selectWorkdir('${escapeHtml(d.path)}')">
+            <div style="min-width:0;">
+              <div style="font-size:13px;font-weight:600;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.name)}</div>
+              <div style="font-size:11px;color:var(--text-dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.path)}</div>
+            </div>
+            <span style="font-size:10px;color:var(--text-dim);flex-shrink:0;">${escapeHtml(d.source || "")}</span>
+          </div>
+        `).join("");
+      } catch (e) {
+        list.innerHTML = `<div style="padding:16px; text-align:center; color:var(--text-muted); font-size:12px;">加载失败: ${escapeHtml(e.message)}</div>`;
+      }
+    }
+
+    async function selectWorkdir(path) {
+      if (!path) return;
+      setWorkdirLabel(path);
+      toggleWorkdirSheet(false);
+      if (currentSessionId) {
+        try {
+          await fetch("/api/sessions/set_dir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: currentSessionId, directory: path })
+          });
+        } catch (_) {}
+      }
+    }
+
+    async function applyCustomWorkdir() {
+      const inp = document.getElementById("workdir-custom-input");
+      if (!inp || !inp.value.trim()) return;
+      await selectWorkdir(inp.value.trim());
+      inp.value = "";
+    }
+
+    // ── 深度思考模式（同步桌面 preferences.think，控件位于模型选择弹层内） ──────────
+    let currentThink = "";
+
+    function setThinkUI(mode) {
+      currentThink = mode || "";
+      document.querySelectorAll(".think-seg-btn").forEach(btn => {
+        btn.classList.toggle("active", (btn.getAttribute("data-think-mode") || "") === currentThink);
+      });
+      const hintText = currentThink === "extra" ? "更深" : currentThink === "think" ? "开启" : "关闭";
+      ["think-mode-hint", "think-mode-hint-pop"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = hintText;
+      });
+    }
+
+    async function loadThinkMode() {
+      try {
+        const r = await fetch("/api/think");
+        const d = await r.json();
+        setThinkUI(d.think || "");
+      } catch (_) {}
+    }
+
+    async function setThinkMode(mode) {
+      const next = mode || "";
+      setThinkUI(next);
+      try {
+        await fetch("/api/think", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ think: next })
+        });
+      } catch (_) {}
+    }
+
+    // ── 会话重命名 ─────────────────────────────────────────
+    function toggleRenameSheet(open) {
+      const sheet = document.getElementById("rename-sheet");
+      if (!sheet) return;
+      if (open) {
+        const inp = document.getElementById("rename-input");
+        const titleEl = document.getElementById("top-session-title");
+        if (inp && titleEl) inp.value = titleEl.textContent || "";
+        sheet.classList.add("open");
+        setTimeout(() => inp && inp.focus(), 50);
+      } else {
+        sheet.classList.remove("open");
+      }
+    }
+
+    async function applyRenameSession() {
+      const inp = document.getElementById("rename-input");
+      const title = (inp?.value || "").trim();
+      if (!title || !currentSessionId) return;
+      try {
+        const r = await fetch("/api/sessions/rename", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: currentSessionId, title })
+        });
+        if (r.ok) {
+          document.getElementById("top-session-title").textContent = title;
+          toggleRenameSheet(false);
+          loadSessionsList();
+        }
+      } catch (e) {
+        alert("重命名失败: " + e.message);
+      }
+    }
+
+    // ── 草稿同步（与桌面 composer-input.json 双向） ────────
+    let draftSyncTimer = null;
+
+    function scheduleDraftSync() {
+      if (draftSyncTimer) clearTimeout(draftSyncTimer);
+      draftSyncTimer = setTimeout(async () => {
+        const inp = document.getElementById("dock-input");
+        if (!inp || !currentSessionId) return;
+        try {
+          await fetch("/api/draft", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_id: currentSessionId, text: inp.value })
+          });
+        } catch (_) {}
+      }, 600);
+    }
+
+    async function loadServerDraft() {
+      if (!currentSessionId) return;
+      try {
+        const r = await fetch("/api/draft?session_id=" + encodeURIComponent(currentSessionId));
+        const d = await r.json();
+        const inp = document.getElementById("dock-input");
+        if (inp && d && typeof d.text === "string" && d.text && !inp.value) {
+          inp.value = d.text;
+          autoGrow(inp);
+        }
+      } catch (_) {}
+    }
+
+    // 真正的重新生成：不重复气泡，直接重发上一条用户消息
+    async function regenerateLastTurn(btn) {
+      if (isBusy) return;
+      const allUserBubbles = document.querySelectorAll(".user-bubble");
+      if (!allUserBubbles.length) return;
+      const lastUser = allUserBubbles[allUserBubbles.length - 1];
+      const text = lastUser.dataset.rawText || lastUser.innerText || "";
+      if (!text) return;
+      await dispatchChat(text, [], { skipUserBubble: true });
+    }
+
     let currentSessionId = "";
     let selectedModelId = "mimo-auto";
     let selectedModelName = "MiMo Auto";
@@ -5400,6 +5990,47 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     let activeAssistantBox = null;
     let activeProseCard = null;
     let busyPollTimer = null;
+    let pendingSend = null;
+    let recoveryInFlight = false;
+
+    async function checkPendingSendSwallowed(msgs, lastUserCreated) {
+      if (!pendingSend || recoveryInFlight) return;
+      if (Date.now() - pendingSend.t < 45000) return;
+      if (lastUserCreated >= pendingSend.t - 5000) { pendingSend = null; return; }
+      recoveryInFlight = true;
+      try {
+        const st = await (await fetch("/api/session_status?session_id=" + encodeURIComponent(pendingSend.sid) + "&wedge_check=1")).json();
+        if (!st || !st.wedged) { recoveryInFlight = false; return; }
+        const r = await fetch("/api/sessions/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ directory: pendingSend.dir || undefined })
+        });
+        const ns = await r.json();
+        if (!ns || !ns.id) { recoveryInFlight = false; return; }
+        currentSessionId = ns.id;
+        if (activeSseSource) { activeSseSource.close(); activeSseSource = null; }
+        connectSessionSSE(ns.id);
+        if (activeAssistantBox) {
+          addProseText(activeAssistantBox, "🔄 检测到上一条任务被卡死的会话吞掉，已自动切换到新会话并重新发送。");
+        }
+        const resend = pendingSend;
+        pendingSend = null;
+        await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: resend.text, session_id: ns.id,
+            model: resend.model, perm: resend.perm, think: resend.think,
+            files: resend.files,
+            directory: resend.dir || undefined
+          })
+        });
+        startBusyWatch(ns.id);
+        loadSessionsList();
+      } catch (e) {}
+      recoveryInFlight = false;
+    }
     let isContextHudOpen = false;
     let voiceRecognition = null;
     let isVoiceRecording = false;
@@ -5780,13 +6411,27 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
               </div>
               <div class="plugin-desc">${escapeHtml(p.desc)}</div>
             </div>
-            <label class="switch-toggle" title="切换启用状态">
-              <input type="checkbox" ${p.enabled ? "checked" : ""} onchange="togglePluginState('${p.id}', this.checked)">
-              <span class="slider"></span>
-            </label>
+            <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;">
+              <button class="btn-feedback-action" title="插入到输入框" onclick="insertSkillPrompt('${escapeHtml(p.id)}', '${escapeHtml(p.name)}')">使用</button>
+              <label class="switch-toggle" title="切换启用状态">
+                <input type="checkbox" ${p.enabled ? "checked" : ""} onchange="togglePluginState('${p.id}', this.checked)">
+                <span class="slider"></span>
+              </label>
+            </div>
           </div>
         </div>
       `).join("");
+    }
+
+    function insertSkillPrompt(skillId, skillName) {
+      const inp = document.getElementById("dock-input");
+      if (!inp) return;
+      const tag = `/skill:${skillId}`;
+      const cur = inp.value.trim();
+      inp.value = cur ? (cur + "\\n" + tag + " ") : (tag + " ");
+      autoGrow(inp);
+      togglePluginsSheet(false);
+      inp.focus();
     }
 
     async function togglePluginState(pluginId, enabled) {
@@ -6266,6 +6911,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         closeModelSheet();
         popover.style.display = "block";
         loadModelConfig(currentSessionId);
+        loadThinkMode();
         
         requestAnimationFrame(() => {
           popover.style.transform = "none";
@@ -6301,6 +6947,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         sub.textContent = `为任务「${curTitle}」指派专属 AI 模型，或设为新建任务的全局默认`;
       }
       loadModelConfig(currentSessionId);
+      loadThinkMode();
     }
 
     function closeModelSheet() {
@@ -6644,6 +7291,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     function copyToolOutput(btn) {
       const box = btn.closest(".tool-console-box");
       if (!box) return;
+      const card = box.closest(".mimo-tool-card");
+      if (card && card.dataset.hasOutput !== "1") return; // 无真实输出（占位提示）时不复制
       const code = box.querySelector("pre code");
       const text = code ? code.innerText : (box.innerText || "");
       copyText(text, btn);
@@ -6678,20 +7327,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         autoGrow(inp);
         inp.focus();
         inp.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    }
-
-    function regenerateLastTurn(btn) {
-      if (isBusy) return;
-      const allUserBubbles = document.querySelectorAll(".user-bubble");
-      if (!allUserBubbles.length) return;
-      const lastUser = allUserBubbles[allUserBubbles.length - 1];
-      const text = lastUser.dataset.rawText || "";
-      if (!text) return;
-      const inp = document.getElementById("dock-input");
-      if (inp) {
-        inp.value = text;
-        sendPrompt();
       }
     }
 
@@ -6787,6 +7422,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         return;
       }
       currentSessionId = sid;
+      pendingSend = null;
       document.getElementById("top-session-title").textContent = title || "当前任务";
       activeAssistantBox = null;
       activeToolsMap = {};
@@ -6805,6 +7441,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       connectSessionSSE(sid);
       updateContextUsage(sid);
       loadSessionContext(sid);
+      loadServerDraft();
+      try {
+        const sr = await fetch("/api/session_status?session_id=" + encodeURIComponent(sid));
+        // 会话目录随历史一起刷新
+      } catch (_) {}
+      // 从会话列表缓存同步目录标签
+      const hit = (allSessionsCache || []).find(s => s.id === sid);
+      if (hit && hit.directory) setWorkdirLabel(hit.directory);
     }
 
     async function triggerNewSession() {
@@ -6812,11 +7456,15 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         const r = await fetch("/api/sessions/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title: "新任务会话" })
+          body: JSON.stringify({
+            title: "新任务会话",
+            directory: currentWorkdir || undefined
+          })
         });
         const res = await r.json();
         if (res && res.id) {
           currentSessionId = res.id;
+          pendingSend = null;
           document.getElementById("top-session-title").textContent = "新任务会话";
 
           const vp = document.getElementById("chat-viewport");
@@ -6841,6 +7489,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             inp.value = "";
             inp.focus();
           }
+          setWorkdirLabel(res.directory || "");
+          loadServerDraft();
+          loadSessionsList();
         }
       } catch(e) {
         alert("创建新任务失败: " + e.message);
@@ -6857,142 +7508,191 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       } catch(e) {}
     }
 
-    async function loadHistoricalMessages(sid, showLoader = false) {
+    // 历史消息分页渲染：长会话（数百条）一次性 markdown 重绘会卡死主线程，
+    // 这里默认只渲染最近 HIST_PAGE 条，更早的按需展开。
+    let historyCache = { sid: "", msgs: [], startIdx: 0, sig: "" };
+    const HIST_PAGE = 80;
+
+    // 会话内容指纹：用于"切页面回来"的静默对账，判断是否真的需要重绘
+    function histSig(msgs) {
+      if (!Array.isArray(msgs) || !msgs.length) return "0";
+      const last = msgs[msgs.length - 1];
+      const li = (last && last.info) || {};
+      const parts = (last && last.parts) || [];
+      const lp = parts[parts.length - 1] || {};
+      return msgs.length + "|" + (li.id || "") + "|" + (li.finish || "") + "|" + parts.length + "|" + ((lp.text || "").length);
+    }
+
+    async function loadHistoricalMessages(sid, showLoader = false, silent = false) {
       const vp = document.getElementById("chat-viewport");
-      if (showLoader) {
+      activeToolsMap = {};
+      // 静默对账（切页面回来）不显示加载态，避免"一切页面就重新开始加载会话"的观感
+      if (!silent) {
         vp.innerHTML = `<div class="msg-assistant-container"><div class="assistant-prose-card">⏳ 正在同步会话记录...</div></div>`;
       }
-      activeToolsMap = {};
 
       try {
-        const r = await fetch("/api/messages?session_id=" + sid);
-        const msgs = await r.json();
+        const ctrl = new AbortController();
+        const to = setTimeout(() => ctrl.abort(), 12000);
+        let msgs;
+        try {
+          const r = await fetch("/api/messages?session_id=" + encodeURIComponent(sid), { signal: ctrl.signal });
+          msgs = await r.json();
+        } finally { clearTimeout(to); }
 
-        if (Array.isArray(msgs) && msgs.length > 0) {
-          vp.innerHTML = "";
-          let renderedCount = 0;
+        const sig = histSig(msgs);
+        if (silent && historyCache.sid === sid && sig === historyCache.sig) {
+          return; // 无变化：保持当前画面，不重绘、不闪加载态
+        }
 
-          // 判定当前最新一条消息是否正处于运行状态
-          const lastMsg = msgs[msgs.length - 1];
-          const lastInfo = lastMsg?.info || {};
-          const lastRole = lastInfo.role || "assistant";
-          let isRunning = false;
-          let turnStartTime = 0;
-
-          if (lastRole === "user") {
-            isRunning = true;
-            turnStartTime = lastInfo.time?.created || 0;
-          } else if (lastRole === "assistant") {
-            const parts = lastMsg.parts || [];
-            const hasRunningTool = parts.some(p => p.type === "tool" && p.state?.status === "running");
-            const hasError = !!lastInfo.error;
-            const isDone = (lastInfo.finish === "stop" || (lastInfo.time && lastInfo.time.completed)) && !hasRunningTool;
-            if (!isDone && !hasError) {
-              isRunning = true;
-              const parentId = lastInfo.parentID;
-              if (parentId) {
-                const parentMsg = msgs.find(m => (m.info?.id === parentId || m.id === parentId));
-                if (parentMsg && parentMsg.info?.time?.created) {
-                  turnStartTime = parentMsg.info.time.created;
-                }
-              }
-              if (!turnStartTime) {
-                for (let i = msgs.length - 1; i >= 0; i--) {
-                  if (msgs[i].info?.role === "user" && msgs[i].info?.time?.created) {
-                    turnStartTime = msgs[i].info.time.created;
-                    break;
-                  }
-                }
-              }
-              if (!turnStartTime) {
-                turnStartTime = lastInfo.time?.created || 0;
-              }
-            }
-          }
-
-          let curAssistantWrap = null;
-
-          msgs.forEach((m, idx) => {
-            const role = m.info?.role || "assistant";
-            const isLast = (idx === msgs.length - 1);
-
-            if (role === "user") {
-              curAssistantWrap = null;
-              const textParts = (m.parts || []).filter(p => p.type === "text").map(p => p.text).join(String.fromCharCode(10));
-              const clean = stripSystemReminders(textParts);
-              if (clean) {
-                appendUserBubble(clean);
-                renderedCount++;
-              }
-            } else {
-              // 关键聚合：同一交互轮次（Turn）内所有连续的 assistant 中间消息共享同一个气泡容器！
-              if (!curAssistantWrap) {
-                curAssistantWrap = appendAssistantBox();
-                renderedCount++;
-              }
-              const wrap = curAssistantWrap;
-              const isCurrentRunning = isLast && isRunning;
-              if (isCurrentRunning) {
-                activeAssistantBox = wrap;
-              }
-              let hasUnfoldedReasoning = false;
-              (m.parts || []).forEach(p => {
-                if (p.type === "reasoning" && p.text) {
-                  const live = isCurrentRunning && !(m.parts || []).some(x => x.type === "text" && x.text);
-                  addThinking(wrap, p.text, live);
-                  if (live) hasUnfoldedReasoning = true;
-                } else if (p.type === "tool") {
-                  const out = p.state?.output || p.state?.metadata?.output || "";
-                  const desc = p.state?.metadata?.description || p.state?.input?.description || p.state?.input?.summary || "";
-                  addToolCard(wrap, p.callID, p.tool, p.state?.status, p.state?.input, out, desc);
-                } else if (p.type === "text" && p.text) {
-                  addProseText(wrap, p.text, p.id);
-                }
-              });
-
-              // 判断是否到达本轮交互末尾（下一条为 user 或已是全记录最后一条）
-              const nextMsg = msgs[idx + 1];
-              const isTurnEnd = !nextMsg || nextMsg.info?.role === "user";
-
-              if (isTurnEnd) {
-                if (isCurrentRunning) {
-                  const hasRunningTool = (m.parts || []).some(p => p.type === "tool" && p.state?.status === "running");
-                  if (hasRunningTool || hasUnfoldedReasoning) {
-                    showThinkingIndicator(wrap);
-                  }
-                } else {
-                  // 只有整轮完成时，才挂载唯一的反馈操作栏，杜绝重复堆叠
-                  appendFeedbackRow(wrap);
-                }
-              }
-            }
-          });
-
-          if (isRunning && turnStartTime) {
-            markTaskRunning(sid, turnStartTime);
-          } else if (!isRunning && isBusy) {
-            setBusy(false);
-          }
-
-          if (renderedCount === 0) {
+        if (!Array.isArray(msgs) || msgs.length === 0) {
+          historyCache = { sid, msgs: [], startIdx: 0, sig };
+          if (!silent) {
             vp.innerHTML = `
               <div class="msg-assistant-container">
                 <div class="assistant-prose-card">👋 该任务会话暂无消息，请在下方输入开始交流。</div>
-              </div>
-            `;
+              </div>`;
+          }
+          return;
+        }
+        historyCache = { sid, msgs, startIdx: Math.max(0, msgs.length - HIST_PAGE), sig };
+        renderHistoryRange(historyCache.msgs, historyCache.startIdx, true);
+      } catch(e) {
+        if (silent) return; // 静默对账失败不打扰当前画面
+        const isAbort = e && (e.name === "AbortError" || /abort/i.test(String(e)));
+        vp.innerHTML = `<div class="msg-assistant-container"><div class="assistant-prose-card">❌ ${isAbort ? "加载会话记录超时" : "加载会话记录失败"}，请重试。 <button class="btn-load-earlier" style="margin-left:6px;" onclick="loadHistoricalMessages(currentSessionId, true)">重试</button></div></div>`;
+      }
+    }
+
+    function expandHistory() {
+      const { msgs, startIdx } = historyCache;
+      const nextStart = Math.max(0, startIdx - HIST_PAGE);
+      historyCache.startIdx = nextStart;
+      renderHistoryRange(msgs, nextStart, false);
+    }
+
+    function renderHistoryRange(msgs, startIdx, atBottom) {
+      const vp = document.getElementById("chat-viewport");
+      const sid = historyCache.sid;
+      vp.innerHTML = "";
+      let renderedCount = 0;
+
+      // 判定当前最新一条消息是否正处于运行状态（基于全量最后一条）
+      const lastMsg = msgs[msgs.length - 1];
+      const lastInfo = lastMsg?.info || {};
+      const lastRole = lastInfo.role || "assistant";
+      let isRunning = false;
+      let turnStartTime = 0;
+
+      if (lastRole === "user") {
+        isRunning = true;
+        turnStartTime = lastInfo.time?.created || 0;
+      } else if (lastRole === "assistant") {
+        const parts = lastMsg.parts || [];
+        const hasRunningTool = parts.some(p => p.type === "tool" && p.state?.status === "running");
+        const hasError = !!lastInfo.error;
+        const isDone = (lastInfo.finish === "stop" || (lastInfo.time && lastInfo.time.completed)) && !hasRunningTool;
+        if (!isDone && !hasError) {
+          isRunning = true;
+          const parentId = lastInfo.parentID;
+          if (parentId) {
+            const parentMsg = msgs.find(m => (m.info?.id === parentId || m.id === parentId));
+            if (parentMsg && parentMsg.info?.time?.created) {
+              turnStartTime = parentMsg.info.time.created;
+            }
+          }
+          if (!turnStartTime) {
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].info?.role === "user" && msgs[i].info?.time?.created) {
+                turnStartTime = msgs[i].info.time.created;
+                break;
+              }
+            }
+          }
+          if (!turnStartTime) {
+            turnStartTime = lastInfo.time?.created || 0;
+          }
+        }
+      }
+
+      // 更早消息展开入口
+      if (startIdx > 0) {
+        const more = document.createElement("div");
+        more.className = "msg-assistant-container";
+        more.style.textAlign = "center";
+        more.innerHTML = `<button class="btn-load-earlier" onclick="expandHistory()">↑ 加载更早的 ${startIdx} 条对话</button>`;
+        vp.appendChild(more);
+      }
+
+      let curAssistantWrap = null;
+
+      for (let idx = startIdx; idx < msgs.length; idx++) {
+        const m = msgs[idx];
+        const role = m.info?.role || "assistant";
+        const isLast = (idx === msgs.length - 1);
+
+        if (role === "user") {
+          curAssistantWrap = null;
+          const textParts = (m.parts || []).filter(p => p.type === "text").map(p => p.text).join(String.fromCharCode(10));
+          const clean = stripSystemReminders(textParts);
+          if (clean) {
+            appendUserBubble(clean);
+            renderedCount++;
           }
         } else {
-          vp.innerHTML = `
-            <div class="msg-assistant-container">
-              <div class="assistant-prose-card">👋 该任务会话暂无消息，请在下方输入开始交流。</div>
-            </div>
-          `;
+          // 关键聚合：同一交互轮次（Turn）内所有连续的 assistant 中间消息共享同一个气泡容器！
+          if (!curAssistantWrap) {
+            curAssistantWrap = appendAssistantBox();
+            renderedCount++;
+          }
+          const wrap = curAssistantWrap;
+          const isCurrentRunning = isLast && isRunning;
+          if (isCurrentRunning) {
+            activeAssistantBox = wrap;
+          }
+          let hasUnfoldedReasoning = false;
+          (m.parts || []).forEach(p => {
+            if (p.type === "reasoning" && p.text) {
+              const live = isCurrentRunning && !(m.parts || []).some(x => x.type === "text" && x.text);
+              addThinking(wrap, p.text, live);
+              if (live) hasUnfoldedReasoning = true;
+            } else if (p.type === "tool") {
+              const out = p.state?.output || p.state?.metadata?.output || "";
+              const desc = p.state?.metadata?.description || p.state?.input?.description || p.state?.input?.summary || "";
+              addToolCard(wrap, p.callID, p.tool, p.state?.status, p.state?.input, out, desc);
+            } else if (p.type === "text" && p.text) {
+              addProseText(wrap, p.text, p.id);
+            }
+          });
+
+          // 判断是否到达本轮交互末尾（下一条为 user 或已是全记录最后一条）
+          const nextMsg = msgs[idx + 1];
+          const isTurnEnd = !nextMsg || nextMsg.info?.role === "user";
+
+          if (isTurnEnd) {
+            if (isCurrentRunning) {
+              const hasRunningTool = (m.parts || []).some(p => p.type === "tool" && p.state?.status === "running");
+              if (hasRunningTool || hasUnfoldedReasoning) {
+                showThinkingIndicator(wrap);
+              }
+            } else {
+              // 只有整轮完成时，才挂载唯一的反馈操作栏，杜绝重复堆叠
+              appendFeedbackRow(wrap);
+            }
+          }
         }
-        vp.scrollTop = vp.scrollHeight;
-        checkViewportScroll();
-      } catch(e) {
-        vp.innerHTML = `<div class="msg-assistant-container"><div class="assistant-prose-card">❌ 加载会话记录失败: ${e.message}</div></div>`;
       }
+
+      if (isRunning && turnStartTime) {
+        markTaskRunning(sid, turnStartTime);
+      } else if (!isRunning && isBusy) {
+        setBusy(false);
+      }
+
+      if (atBottom) {
+        vp.scrollTop = vp.scrollHeight;
+      }
+      checkViewportScroll();
     }
 
     function appendUserBubble(text, files) {
@@ -7075,6 +7775,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (!card) return;
       card.dataset.rawText = fullText;
       card.dataset.rawLength = String(fullText.length);
+
+      // 单槽 RAF：切换到另一张卡片前，先把上一张待渲染卡片立即落盘，
+      // 避免同一回合内 text→工具→text 交替时，前一张卡片的尾部内容被覆盖丢失。
+      if (pendingRenderCard && pendingRenderCard !== card && pendingRenderRaf) {
+        cancelAnimationFrame(pendingRenderRaf);
+        pendingRenderRaf = null;
+        pendingRenderCard.innerHTML = renderMarkdownSafe(pendingRenderText);
+      }
       pendingRenderCard = card;
       pendingRenderText = fullText;
 
@@ -7096,6 +7804,45 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       c.dataset.rawLength = String((text || "").length);
       smartScrollToBottom();
       return c;
+    }
+
+    // 流式文本落卡：引擎的 text-partial / ui.text 常不带稳定 partID，
+    // 且同一 part 的全文会被反复（含跨工具边界）重发。若按"每次新建 default 卡"
+    // 处理，就会把同一段叙述复制成多张卡。这里按"是否为当前文本的延续"决定复用还是新建。
+    function applyStreamText(text, partId) {
+      if (typeof text !== "string") return;
+      // 跨来源/跨 partID 内容去重：引擎可能把同一段叙述以不同（或空）partID 重发，
+      // 历史对账与实时 SSE 也可能各画一份。若视口里已有完全相同的一段，复用那张卡，杜绝重复。
+      const vp = document.getElementById("chat-viewport");
+      if (vp && text.trim()) {
+        const dup = Array.from(vp.querySelectorAll(".assistant-prose-card")).find(c => (c.dataset.rawText || "") === text);
+        if (dup) {
+          const container = dup.closest(".msg-assistant-container");
+          if (container) activeAssistantBox = container;
+          activeTextCard = dup;
+          return;
+        }
+      }
+      if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
+      removeThinkingIndicator(activeAssistantBox);
+      collapseThinking(activeAssistantBox);
+      let card = null;
+      if (partId && partId !== "default") {
+        card = appendProseCard(activeAssistantBox, partId); // 按 partId 去重复用
+        activeTextPartId = partId;
+      } else {
+        const cards = activeAssistantBox.querySelectorAll(".assistant-prose-card");
+        const last = cards.length ? cards[cards.length - 1] : null;
+        const cur = last ? (last.dataset.rawText || "") : "";
+        if (last && (text === cur || (text.length >= cur.length && text.startsWith(cur)))) {
+          card = last; // 同一 part 累积增长（含工具边界后重发）→ 复用，杜绝重复
+        } else {
+          card = appendProseCard(activeAssistantBox, null); // 新段落 → 新建
+          activeTextPartId = null;
+        }
+      }
+      activeTextCard = card;
+      updateProseContent(card, text);
     }
 
     // ── 深度思考展示与自动折叠 ─────────────────────────────────
@@ -7293,8 +8040,10 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         card.classList.add("error");
       }
 
+      const codeEl = card.querySelector(".tool-output-pre code");
+      const copyBtn = card.querySelector(".btn-copy-tool");
       if (outputData) {
-        const codeEl = card.querySelector(".tool-output-pre code");
+        card.dataset.hasOutput = "1";
         if (codeEl) {
           if (tName.includes("edit") && typeof Prism !== "undefined" && Prism.languages.diff) {
             try {
@@ -7306,6 +8055,17 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             codeEl.textContent = outputData;
           }
         }
+        if (copyBtn) copyBtn.style.display = "";
+      } else if (codeEl) {
+        // 尚无输出：执行中给占位提示，避免"点开控制台却是空的"造成误解
+        card.dataset.hasOutput = "";
+        const txt = codeEl.textContent.trim();
+        if (!txt || txt.charAt(0) === "⏳" || txt.charAt(0) === "（") {
+          codeEl.textContent = isRunning
+            ? "⏳ 执行中，输出将在完成后显示…"
+            : (isCompleted ? "（该步骤无文本输出）" : "");
+        }
+        if (copyBtn) copyBtn.style.display = "none";
       }
       smartScrollToBottom();
     }
@@ -7342,28 +8102,43 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           if (Array.isArray(msgs) && msgs.length > 0) {
             const last = msgs[msgs.length - 1];
             const info = last.info || {};
+            const lastUserCreated = (() => {
+              for (let i = msgs.length - 1; i >= 0; i--) {
+                if (msgs[i].info?.role === "user") return msgs[i].info?.time?.created || 0;
+              }
+              return 0;
+            })();
+            checkPendingSendSwallowed(msgs, lastUserCreated);
+            if (info.role !== "assistant" && count % 8 === 0 && Date.now() - lastUserCreated > 90000) {
+              fetch("/api/session_status?session_id=" + sid + "&wedge_check=1")
+                .then(x => x.json())
+                .then(st => {
+                  if (st && st.wedged && isBusy && currentSessionId === sid) {
+                    stopBusyWatch();
+                    removeThinkingIndicator(activeAssistantBox);
+                    if (activeAssistantBox) {
+                      addProseText(activeAssistantBox, "⚠️ 引擎上一任务卡死（runner 未释放），你的消息已被静默排队。下一条消息将由网关自动切换到新会话继续，也可现在点击左上角新建任务。");
+                    }
+                  }
+                })
+                .catch(() => {});
+            }
             if (info.role === "assistant") {
               const parts = last.parts || [];
               const hasRunningTool = parts.some(p => p.type === "tool" && p.state?.status === "running");
               const isDone = (info.finish === "stop" || (info.time && info.time.completed)) && !hasRunningTool;
               if (isDone) {
+                pendingSend = null;
                 stopBusyWatch();
                 removeThinkingIndicator(activeAssistantBox);
                 collapseThinking(activeAssistantBox);
                 flushProseRender();
-                if (activeAssistantBox && activeAssistantBox.children.length > 0) {
-                  if (!activeAssistantBox.dataset.feedbackDone) {
-                    appendFeedbackRow(activeAssistantBox);
-                    activeAssistantBox.dataset.feedbackDone = "1";
-                  }
-                } else {
-                  loadHistoricalMessages(sid, false);
-                }
                 setBusy(false);
                 activeAssistantBox = null;
                 activeTextCard = null;
                 activeTextPartId = null;
                 activeToolsMap = {};
+                loadHistoricalMessages(sid, false);
                 loadSessionsList();
                 updateContextUsage(sid);
               } else {
@@ -7408,26 +8183,37 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       }
     }
 
-    async function sendPrompt() {
-      const input = document.getElementById("dock-input");
-      const text = input.value.trim();
-      if ((!text && !attachedFiles.length) || isBusy) return;
+    async function dispatchChat(message, files, opts = {}) {
+      const skipUserBubble = !!opts.skipUserBubble;
+      const text = (message || "").trim();
+      if (!text && !(files && files.length)) return;
+      if (isBusy) return;
 
       if (navigator.vibrate) navigator.vibrate(12);
 
       const topTitle = document.getElementById("top-session-title");
-      if (topTitle && (topTitle.textContent === "新任务会话" || topTitle.textContent === "当前任务")) {
+      if (topTitle && (topTitle.textContent === "新任务会话" || topTitle.textContent === "当前任务" || topTitle.textContent === "新任务")) {
         topTitle.textContent = (text || "附件任务").slice(0, 24);
       }
 
-      const sendingFiles = attachedFiles.slice();
-      appendUserBubble(text || "请查看所附文件/图片", sendingFiles);
+      const sendingFiles = (files || []).slice();
+      if (!skipUserBubble) {
+        appendUserBubble(text || "请查看所附文件/图片", sendingFiles);
+      }
       const filePaths = sendingFiles.map(f => f.path);
-      attachedFiles = [];
-      renderAttachedFiles();
+      if (!skipUserBubble) {
+        attachedFiles = [];
+        renderAttachedFiles();
+      }
 
-      input.value = "";
-      input.style.height = "auto";
+      const input = document.getElementById("dock-input");
+      if (!skipUserBubble && input) {
+        input.value = "";
+        input.style.height = "auto";
+        try { localStorage.removeItem("mimo.draft." + (currentSessionId || "default")); } catch (_) {}
+        set_composer_draft_clear();
+      }
+
       const promptNow = Date.now();
       busyStartTime = promptNow;
       setBusy(true, promptNow);
@@ -7453,7 +8239,9 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             session_id: currentSessionId,
             model: selectedModelId,
             perm: selectedPerm,
-            files: filePaths
+            files: filePaths,
+            think: currentThink,
+            directory: currentWorkdir || undefined
           })
         });
         const respText = await r.text();
@@ -7470,6 +8258,25 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           const errMsg = res.error || res.message || res.code || `引擎响应异常 (HTTP ${r.status})`;
           addProseText(activeAssistantBox, "❌ 调度出错: " + errMsg);
           setBusy(false);
+        } else if (res.migrated && res.session_id) {
+          pendingSend = null;
+          currentSessionId = res.session_id;
+          if (activeSseSource) { activeSseSource.close(); activeSseSource = null; }
+          connectSessionSSE(currentSessionId);
+          startBusyWatch(currentSessionId);
+          if (activeAssistantBox) {
+            addProseText(activeAssistantBox, "🔄 " + (res.warning || "上一任务卡死，已自动切换到新会话继续。"));
+          }
+          loadSessionsList();
+        } else if (res.warning && activeAssistantBox) {
+          addProseText(activeAssistantBox, "⚠️ " + res.warning);
+        } else {
+          pendingSend = {
+            t: promptNow, sid: currentSessionId,
+            text: text || "请查看所附文件/图片",
+            model: selectedModelId, perm: selectedPerm, think: currentThink,
+            files: filePaths, dir: currentWorkdir || undefined
+          };
         }
       } catch (e) {
         stopBusyWatch();
@@ -7478,6 +8285,22 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         addProseText(activeAssistantBox, "❌ 请求失败: " + e.message);
         setBusy(false);
       }
+    }
+
+    function set_composer_draft_clear() {
+      if (!currentSessionId) return;
+      fetch("/api/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: currentSessionId, text: "" })
+      }).catch(() => {});
+    }
+
+    async function sendPrompt() {
+      const input = document.getElementById("dock-input");
+      const text = input.value.trim();
+      if ((!text && !attachedFiles.length) || isBusy) return;
+      await dispatchChat(text, attachedFiles, { skipUserBubble: false });
     }
 
     function setBusy(busy, startTime) {
@@ -7569,13 +8392,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         // ── 2. 文本流（累积全文，平滑流畅渲染）
         } else if (type === "text-partial" && typeof ev.text === "string") {
           markTaskRunning(sid);
-          if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
-          removeThinkingIndicator(activeAssistantBox);
-          collapseThinking(activeAssistantBox);
-          if (!activeTextCard) {
-            activeTextCard = appendProseCard(activeAssistantBox, activeTextPartId || "default");
-          }
-          updateProseContent(activeTextCard, ev.text);
+          applyStreamText(ev.text, activeTextPartId);
 
         // ── 3. ui 事件（tool / text / title / usage / reasoning）
         } else if (type === "ui" && ev.ui) {
@@ -7584,20 +8401,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
           if (ui.kind === "text") {
             markTaskRunning(sid);
-            removeThinkingIndicator(activeAssistantBox);
-            collapseThinking(activeAssistantBox);
-            if (ui.partID && ui.partID !== activeTextPartId) {
-              activeTextPartId = ui.partID;
-              activeTextCard = appendProseCard(activeAssistantBox, ui.partID);
-            } else if (!activeTextCard) {
-              activeTextCard = appendProseCard(activeAssistantBox, ui.partID || "default");
-            }
-            if (typeof ui.text === "string") {
-              const curLen = parseInt(activeTextCard.dataset.rawLength || "0", 10);
-              if (ui.text.length > curLen) {
-                updateProseContent(activeTextCard, ui.text);
-              }
-            }
+            applyStreamText(ui.text, ui.partID);
 
           } else if (ui.kind === "reasoning" || ui.kind === "thought" || ui.kind === "thinking") {
             markTaskRunning(sid);
@@ -7635,16 +8439,13 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           removeThinkingIndicator(activeAssistantBox);
           collapseThinking(activeAssistantBox);
           flushProseRender();
-          if (activeAssistantBox && !activeAssistantBox.dataset.feedbackDone) {
-            appendFeedbackRow(activeAssistantBox);
-            activeAssistantBox.dataset.feedbackDone = "1";
-          }
           setBusy(false);
           activeAssistantBox = null;
           activeTextCard = null;
           activeTextPartId = null;
           activeToolsMap = {};
           stopBusyWatch();
+          loadHistoricalMessages(sid, false);
           loadSessionsList();
           updateContextUsage(sid);
           loadSessionContext(sid);
@@ -7807,6 +8608,17 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       loadPermConfig();
       loadSessionsList();
       updateContextUsage();
+      loadThinkMode();
+
+      // 标题双击重命名（对齐桌面端）
+      const titleEl = document.getElementById("top-session-title");
+      if (titleEl) {
+        titleEl.style.cursor = "pointer";
+        titleEl.title = "双击重命名任务";
+        titleEl.addEventListener("dblclick", function() {
+          if (currentSessionId) toggleRenameSheet(true);
+        });
+      }
 
       // 2. 绑定视口滚动检测
       const vp = document.getElementById("chat-viewport");
@@ -7848,11 +8660,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           connectSessionSSE(act.id);
           updateContextUsage(act.id);
           loadSessionContext(act.id);
+          if (act.directory) setWorkdirLabel(act.directory);
+          loadServerDraft();
         } else {
           document.getElementById("top-session-title").textContent = "新任务";
           if (vp) {
             vp.innerHTML = '<div class="msg-assistant-container"><div class="assistant-prose-card">👋 你好！我是 Xiaomi MiMo，请在下方描述你想要执行的编码或系统任务...</div></div>';
           }
+          loadServerDraft();
         }
       } catch (e) {
         clearTimeout(safetyTimer);
@@ -7863,31 +8678,28 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       }
     }
 
-    // 手机锁屏或切换后台唤醒监听：重新切回页面时毫秒级自动对齐耗时与最新消息
+    // 手机锁屏/切后台再回前台：后台大概率已断开 SSE，且期间产生的新消息不会自动补显。
+    // 回到前台时重建 SSE 并从权威数据对账，根治"锁屏后看不见更新、直接卡死"。
+    let _hiddenAt = 0;
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") {
-        if (isBusy) {
-          paintTaskLiveUI();
-        }
-        if (currentSessionId) {
-          fetch("/api/session_status?session_id=" + currentSessionId)
-            .then(r => r.json())
-            .then(st => {
-              if (st && st.is_busy) {
-                if (st.turn_start_time) {
-                  busyStartTime = st.turn_start_time;
-                  paintTaskLiveUI();
-                }
-                if (!isBusy) setBusy(true, st.turn_start_time);
-              } else if (st && !st.is_busy && isBusy) {
-                setBusy(false);
-                loadHistoricalMessages(currentSessionId, false);
-              }
-            })
-            .catch(() => {});
-          loadSessionContext(currentSessionId);
-        }
+      if (document.visibilityState === "hidden") {
+        _hiddenAt = Date.now();
+        return;
       }
+      // visible
+      if (isBusy) paintTaskLiveUI();
+      if (!currentSessionId) return;
+      const away = _hiddenAt ? (Date.now() - _hiddenAt) : 0;
+      _hiddenAt = 0;
+      if (away < 2500) return; // 极短暂的前后台切换不打断进行中的流式
+      (async () => {
+        try {
+          connectSessionSSE(currentSessionId);          // 后台大概率已断，重建流
+          loadSessionContext(currentSessionId);
+          updateContextUsage(currentSessionId);
+          await loadHistoricalMessages(currentSessionId, false, true); // 静默对账：变了才重绘
+        } catch (_) {}
+      })();
     });
 
     // 兼容所有浏览器环境，即使 DOMContentLoaded 早已触发也能即时启动
@@ -8250,6 +9062,17 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
         elif path == "/api/session_status":
             sid = query.get("session_id", [None])[0] or get_desktop_current_session_id()
             status = get_session_turn_status(sid) if sid else {"is_busy": False, "turn_start_time": 0}
+            if sid:
+                try:
+                    if query.get("wedge_check", ["0"])[0] == "1":
+                        status["wedged"] = is_session_wedged(sid)
+                    else:
+                        status["runner_reentry"] = bool(status.get("is_busy")) and detect_runner_reentry(
+                            sid, anchor_ms=get_last_user_message_time(sid)
+                        )
+                except Exception:
+                    status.setdefault("wedged", False)
+                    status.setdefault("runner_reentry", False)
             self.send_json(200, status)
             return
 
@@ -8260,6 +9083,22 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             if sid:
                 ctx["model"] = get_session_model(sid)
             self.send_json(200, ctx)
+            return
+
+        # 8b. 思考模式
+        elif path == "/api/think":
+            self.send_json(200, {"ok": True, "think": get_current_think()})
+            return
+
+        # 8c. 最近工作目录
+        elif path == "/api/dirs":
+            self.send_json(200, {"ok": True, "dirs": list_recent_dirs()})
+            return
+
+        # 8d. 输入草稿（与桌面 composer 同步）
+        elif path == "/api/draft":
+            sid = query.get("session_id", [""])[0] or get_desktop_current_session_id()
+            self.send_json(200, {"ok": True, "text": get_composer_draft(sid) if sid else ""})
             return
 
         # 8. 会话列表 (按更新时间倒序排序，过滤掉内部中间态会话)
@@ -8383,8 +9222,47 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             # 1. 新建会话
             if path in ("/api/sessions/create", "/api/sessions"):
                 title = payload.get("title", "新任务会话")
-                sess = create_new_mimo_session_in_db(title=title)
+                directory = payload.get("directory") or None
+                if directory:
+                    directory = os.path.expanduser(str(directory).strip())
+                    if not os.path.isdir(directory):
+                        directory = None
+                sess = create_new_mimo_session_in_db(title=title, directory=directory)
                 self.send_json(200, sess)
+                return
+
+            # 1a. 重命名会话
+            elif path == "/api/sessions/rename":
+                sid = payload.get("session_id") or payload.get("id")
+                title = payload.get("title", "")
+                ok = rename_session(sid, title)
+                self.send_json(200 if ok else 400, {"ok": ok, "id": sid, "title": title})
+                return
+
+            # 1a2. 切换工作目录
+            elif path == "/api/sessions/set_dir":
+                sid = payload.get("session_id") or payload.get("id")
+                directory = payload.get("directory") or payload.get("path") or ""
+                ok = update_session_directory(sid, directory)
+                self.send_json(200 if ok else 400, {"ok": ok, "id": sid, "directory": directory})
+                return
+
+            # 1a3. 同步输入草稿
+            elif path == "/api/draft":
+                sid = payload.get("session_id") or payload.get("id")
+                text = payload.get("text", "")
+                ok = set_composer_draft(sid, text)
+                self.send_json(200, {"ok": ok})
+                return
+
+            # 1a4. 切换深度思考
+            elif path == "/api/think":
+                target = payload.get("think", "")
+                if target not in ("", "think", "extra"):
+                    self.send_json(400, {"error": "不支持的思考模式"})
+                    return
+                ok = set_current_think(target)
+                self.send_json(200, {"ok": ok, "think": get_current_think()})
                 return
 
             # 1c. 删除会话 (从 SQLite 及桌面端同步移除)
@@ -8423,6 +9301,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             elif path == "/api/chat":
                 msg = payload.get("message", "").strip()
                 sid = payload.get("session_id", "").strip()
+                migrated_from = None
                 raw_model = payload.get("model") or get_session_model(sid)["canonicalId"]
                 model = resolve_canonical_model(raw_model)
 
@@ -8439,6 +9318,12 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
 
                 # 查询此 session 的真实工作目录 directory、更新标题并预配置权限规则
                 directory = DEFAULT_WORKDIR
+                requested_dir = payload.get("directory") or payload.get("dir") or None
+                if requested_dir:
+                    requested_dir = os.path.expanduser(str(requested_dir).strip())
+                    if os.path.isdir(requested_dir):
+                        directory = os.path.realpath(requested_dir)
+                        update_session_directory(sid, directory)
                 if os.path.exists(MIMO_DB_PATH):
                     try:
                         conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
@@ -8446,7 +9331,7 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                         c.execute("SELECT directory, title FROM session WHERE id = ?", (sid,))
                         row = c.fetchone()
                         if row:
-                            if row[0]:
+                            if row[0] and not requested_dir:
                                 directory = row[0]
                             if not row[1] or row[1] in ("新任务会话", "新建任务会话", "未命名任务"):
                                 new_title = msg.replace("\n", " ")[:32].strip()
@@ -8465,13 +9350,44 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                         pass
                 set_desktop_focus_session(sid, directory=directory)
 
+                # 卡死自愈：会话 runner 已 reentry 卡死时，自动迁移到新会话继续，不依赖重启桌面端
+                migrated_from = None
+                try:
+                    if is_session_wedged(sid):
+                        old_sid = sid
+                        cur_title = None
+                        try:
+                            conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+                            c = conn.cursor()
+                            c.execute("SELECT title FROM session WHERE id = ?", (old_sid,))
+                            trow = c.fetchone()
+                            conn.close()
+                            cur_title = trow[0] if trow else None
+                        except Exception:
+                            pass
+                        new_sess = create_new_mimo_session_in_db(
+                            title=(cur_title or "新任务会话"), directory=directory
+                        )
+                        new_sid = new_sess.get("id")
+                        if new_sid:
+                            sid = new_sid
+                            migrated_from = old_sid
+                            set_desktop_focus_session(sid, directory=directory)
+                except Exception:
+                    pass
+
                 files = payload.get("files", [])
+                think_mode = payload.get("think", None)
+                if think_mode is None:
+                    think_mode = get_current_think()
                 req_body = {
                     "message": msg,
                     "model": model,
                     "perm": perm,
                     "dir": directory,
                 }
+                if think_mode:
+                    req_body["think"] = think_mode
                 if isinstance(files, list) and files:
                     req_body["files"] = [f for f in files if isinstance(f, str) and f]
 
@@ -8491,6 +9407,12 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                         res["error"] = res["code"]
                     else:
                         res["error"] = f"MiMo 引擎返回状态码 HTTP {code}"
+                elif "error" not in res:
+                    if migrated_from:
+                        res["migrated"] = True
+                        res["session_id"] = sid
+                        res["migrated_from"] = migrated_from
+                        res["warning"] = "检测到上一任务在该会话卡死，已自动新建会话继续执行，本条消息正常处理中。"
                 self.send_json(code, res)
                 return
 
