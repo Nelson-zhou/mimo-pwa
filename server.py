@@ -1985,14 +1985,15 @@ def create_new_mimo_session_in_db(title: str = "新任务会话", directory: Opt
 
 
 def call_mimo_v1(
-    endpoint: str, method: str = "GET", body: Optional[Dict[str, Any]] = None, timeout: float = 12.0
+    endpoint: str, method: str = "GET", body: Optional[Dict[str, Any]] = None, timeout: float = 12.0,
+    prefix: str = "v1",
 ) -> Tuple[int, Any]:
     """向 Xiaomi MiMo Desktop 官方 v1 接口通信"""
     port, token = load_desktop_api_credentials()
     if not port or not token:
         return 503, {"error": "电脑上的 Xiaomi MiMo Desktop 尚未运行"}
 
-    url = f"http://127.0.0.1:{port}/v1/{endpoint.lstrip('/')}"
+    url = f"http://127.0.0.1:{port}/{prefix}/{endpoint.lstrip('/')}"
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -2016,6 +2017,120 @@ def call_mimo_v1(
             return e.code, {"error": raw}
     except Exception as e:
         return 502, {"error": str(e)}
+
+
+def session_directory(sid: Optional[str]) -> str:
+    """会话工作目录：引擎的 /v1 接口要靠它决定 dir 查询参数"""
+    directory = DEFAULT_WORKDIR
+    if sid and os.path.exists(MIMO_DB_PATH):
+        try:
+            conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+            c = conn.cursor()
+            c.execute("SELECT directory FROM session WHERE id = ?", (sid,))
+            row = c.fetchone()
+            conn.close()
+            if row and row[0]:
+                directory = row[0]
+        except Exception:
+            pass
+    return directory
+
+
+def session_messages_raw(sid: str) -> List[Dict[str, Any]]:
+    code, data = call_mimo_v1(f"sessions/{sid}/messages")
+    return data if code == 200 and isinstance(data, list) else []
+
+
+def session_title(sid: str) -> Optional[str]:
+    try:
+        conn = sqlite3.connect(MIMO_DB_PATH, timeout=2)
+        c = conn.cursor()
+        c.execute("SELECT title FROM session WHERE id = ?", (sid,))
+        row = c.fetchone()
+        conn.close()
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
+
+def question_lock_state(msgs: List[Dict[str, Any]]) -> Optional[str]:
+    """看会话尾部那道 question 的下场：
+    "pending"   还挂着等答案 —— 引擎把会话算作"回合仍在执行"，任何新消息都被 busy 拒
+    "abandoned" 被引擎放弃了   —— 该会话 runner 已废，再发消息 HTTP 202 但引擎静默不吐字
+    None        没有未了结的选择题（含已在电脑端答过的情况）"""
+    for m in reversed(msgs):
+        if not isinstance(m, dict):
+            continue
+        for p in reversed(m.get("parts") or []):
+            if not isinstance(p, dict):
+                continue
+            if p.get("type") == "text" and (p.get("text") or "").strip():
+                return None
+            if p.get("tool") == "question":
+                status = str((p.get("state") or {}).get("status") or "")
+                if status in ("running", "pending", "busy"):
+                    return "pending"
+                if status in ("error", "failed"):
+                    return "abandoned"
+                return None
+    return None
+
+
+def resume_digest_of(msgs: List[Dict[str, Any]], max_chars: int = 5000) -> str:
+    """把锁死会话的尾部对话摘成前情提要，供新会话接着干"""
+    lines: List[str] = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        role = (m.get("info") or {}).get("role") or "?"
+        for p in m.get("parts") or []:
+            if not isinstance(p, dict):
+                continue
+            if p.get("type") == "text":
+                text = (p.get("text") or "").strip()
+                if text and not text.startswith("<system-reminder>") and "Runtime context" not in text[:80]:
+                    lines.append(f"{role}: {text[:600]}")
+            elif p.get("type") == "tool":
+                lines.append(f"工具 {p.get('tool')} → {(p.get('state') or {}).get('status')}")
+    return "\n".join(lines[-40:])[-max_chars:]
+
+
+def engine_route_scan(sid: Optional[str] = None) -> Dict[str, Any]:
+    """诊断：桌面端 /v1 门面只挂了极少数路由。逐条打候选路径，
+    用 404(not-found) 与其它状态码区分"路由不存在"和"路由存在但我不满意参数"。"""
+    d = urllib.parse.quote(session_directory(sid))
+    tail = "?dir=" + d
+    session_sub = [
+        "turns", "messages", "message", "prompt", "inbox", "queue", "input",
+        "steer", "interrupt", "followup", "append", "question", "questions",
+        "reply", "answer", "answers", "permission", "permissions", "abort",
+        "stop", "cancel", "revert", "fork", "state", "status", "events",
+    ]
+    root_paths = [
+        "question", "questions", "reply", "answer", "event", "events",
+        "subscribe", "permission", "permissions", "abort", "interrupt",
+    ]
+    report: Dict[str, Any] = {"session": sid, "session_routes": {}, "root_routes": {}, "turn_flags": {}}
+
+    def probe(path: str, method: str) -> str:
+        code, res = call_mimo_v1(path, method=method, timeout=6.0)
+        blob = json.dumps(res, ensure_ascii=False)[:120] if not isinstance(res, str) else res[:120]
+        return f"{code} {blob}"
+
+    for name in session_sub:
+        path = f"sessions/{sid}/{name}{tail}" if sid else f"sessions/{name}"
+        report["session_routes"][name] = probe(path, "POST")
+    for name in root_paths:
+        report["root_routes"][name] = probe(name + tail, "POST")
+
+    body = {"message": "__probe__", "model": get_current_model(), "dir": session_directory(sid)}
+    for flag in ("interrupt", "force", "cancel", "steer", "queue", "replace", "noReply"):
+        variant = dict(body)
+        variant[flag] = True
+        code, res = call_mimo_v1(f"sessions/{sid}/turns{tail}", method="POST", body=variant, timeout=6.0)
+        report["turn_flags"][flag] = f"{code} {json.dumps(res, ensure_ascii=False)[:120]}"
+    return report
+
 
 
 def get_tailscale_ip() -> Optional[str]:
@@ -2316,7 +2431,7 @@ PWA_MANIFEST_JSON = json.dumps(
 )
 
 PWA_SERVICE_WORKER_JS = """
-const CACHE_NAME = 'mimo-pwa-v26';
+const CACHE_NAME = 'mimo-pwa-v49';
 const PRECACHE = [
   '/',
   '/index.html',
@@ -3182,6 +3297,30 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     .thinking-box.open .thinking-content {
       display: block;
     }
+
+    /* 引擎选择题卡片（question 工具：题目 + 可点选项） */
+    .mimo-question-card {
+      background: #FFFDF5;
+      border: 1px solid #FDE68A;
+      border-radius: 10px;
+      margin: 10px 0;
+      padding: 10px 12px;
+    }
+    .mimo-question-card.answered { background: #F8FAFC; border-color: var(--border-subtle); }
+    .mq-head { font-size: 12px; font-weight: 600; color: #B45309; margin-bottom: 6px; }
+    .mimo-question-card.answered .mq-head { color: var(--text-muted); }
+    .mq-q { font-size: 13.5px; color: var(--text-primary); margin: 8px 0 6px; line-height: 1.5; }
+    .mq-q-label { color: #6B7280; font-weight: 600; }
+    .mq-opt {
+      display: block; width: 100%; text-align: left;
+      background: #FFFFFF; border: 1px solid var(--border-subtle);
+      border-radius: 8px; padding: 8px 10px; margin: 6px 0;
+      font-size: 13px; color: var(--text-primary); cursor: pointer;
+    }
+    .mq-opt:active { background: #F1F5F9; }
+    .mq-opt-label { font-weight: 600; }
+    .mq-opt-desc { display: block; font-size: 12px; color: #6B7280; margin-top: 2px; line-height: 1.45; }
+    .mq-opt.selected { border-color: #F59E0B; background: #FFFBEB; box-shadow: 0 0 0 1px #F59E0B inset; }
 
     /* 终端工具执行卡片 */
     .mimo-tool-card {
@@ -5988,33 +6127,52 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     let activeSseSource = null;
     let activeToolsMap = {};
     let activeAssistantBox = null;
+    // 标记"本轮由本机发起并已用 LiveTurn 实时渲染"：idle 完成时就地保留流式结果，
+    // 不再整屏重拉历史重绘（否则每发一条消息都像"重新加载会话"）。
+    let localStreamTurn = false;
+    let preSendLastMsgId = "";
+    // 最近一次收到任何 SSE 帧（含 busy 心跳）的时间戳。健康回合会持续心跳，
+    // 若长时间无帧 → 引擎 runner 已死（典型：旧构建会话被当前引擎静默吞掉/卡住），
+    // 据此打破"正在工作"无限转圈。
+    let lastSseEventTs = 0;
+    // 连续因"引擎无响应"自动切新会话重发的次数，防止引擎整体卡死时无限新建会话；
+    // 任一回合成流式输出/正常 idle 完成即归零。
+    let stallMigrateCount = 0;
+    // 已判定"死轮次"的会话：引擎之后还会持续发 busy 心跳（它自己以为这轮在跑），
+    // 若不静音，心跳会不断把 UI 重新点亮成"工作中"→ 几秒一轮的整屏刷新。静音直到该会话
+    // 真的出现新内容（流式文本/工具活动）或本机重新发消息为止。
+    let deadTurnSid = "";
+    let deadTurnSquelched = false;
+    // 引擎弹出选择题（question 工具）挂起中：此时输入框必须可用，答案要能直接发回去
+    let questionPending = false;
+    function unsquelchDeadTurn(sid) {
+      if (deadTurnSquelched && (!sid || sid === deadTurnSid)) {
+        deadTurnSquelched = false;
+        deadTurnSid = "";
+      }
+    }
     let activeProseCard = null;
     let busyPollTimer = null;
     let pendingSend = null;
     let recoveryInFlight = false;
 
-    async function checkPendingSendSwallowed(msgs, lastUserCreated) {
-      if (!pendingSend || recoveryInFlight) return;
-      if (Date.now() - pendingSend.t < 45000) return;
-      if (lastUserCreated >= pendingSend.t - 5000) { pendingSend = null; return; }
+    // 引擎吞消息 / runner 死掉时的统一恢复：新建会话、切换、把 pendingSend 原文重发。
+    // 供两条路径复用：①历史轮询发现"用户消息根本没落库"；②SSE 长时间零帧(含心跳)。
+    async function migrateSwallowedSend(resend, noteText) {
+      if (!resend || recoveryInFlight) return;
       recoveryInFlight = true;
       try {
-        const st = await (await fetch("/api/session_status?session_id=" + encodeURIComponent(pendingSend.sid) + "&wedge_check=1")).json();
-        if (!st || !st.wedged) { recoveryInFlight = false; return; }
         const r = await fetch("/api/sessions/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ directory: pendingSend.dir || undefined })
+          body: JSON.stringify({ directory: resend.dir || undefined })
         });
         const ns = await r.json();
         if (!ns || !ns.id) { recoveryInFlight = false; return; }
         currentSessionId = ns.id;
         if (activeSseSource) { activeSseSource.close(); activeSseSource = null; }
         connectSessionSSE(ns.id);
-        if (activeAssistantBox) {
-          addProseText(activeAssistantBox, "🔄 检测到上一条任务被卡死的会话吞掉，已自动切换到新会话并重新发送。");
-        }
-        const resend = pendingSend;
+        if (activeAssistantBox) addProseText(activeAssistantBox, "🔄 " + noteText);
         pendingSend = null;
         await fetch("/api/chat", {
           method: "POST",
@@ -6026,10 +6184,20 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             directory: resend.dir || undefined
           })
         });
+        lastSseEventTs = Date.now();
         startBusyWatch(ns.id);
         loadSessionsList();
       } catch (e) {}
       recoveryInFlight = false;
+    }
+
+    async function checkPendingSendSwallowed(msgs, lastUserCreated) {
+      if (!pendingSend || recoveryInFlight) return;
+      if (Date.now() - pendingSend.t < 45000) return;
+      if (lastUserCreated >= pendingSend.t - 5000) { pendingSend = null; return; }
+      // 用户消息压根没落库 → 被引擎吞掉。切新会话重发（不再依赖过窄的 reentry 判定）。
+      const resend = pendingSend;
+      await migrateSwallowedSend(resend, "上一条消息被失效的会话吞掉了，已自动切换到新会话重新发送。");
     }
     let isContextHudOpen = false;
     let voiceRecognition = null;
@@ -6719,11 +6887,31 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 
     if ("serviceWorker" in navigator) {
+      // 新 SW 接管后强制刷新一次：HTML 是 network-first，刷新即拿到最新内联 JS，
+      // 根治"改了服务端但手机还在跑旧缓存外壳、改动像没生效"。reloaded 守卫防刷新循环。
+      let _swReloaded = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (_swReloaded) return;
+        _swReloaded = true;
+        // 正在流式输出时先不打断，等这一轮空闲再刷新（下一次进入自然生效）
+        if (typeof isBusy !== "undefined" && isBusy) { _swReloaded = false; return; }
+        window.location.reload();
+      });
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("/sw.js", { scope: "/", updateViaCache: "none" })
           .then((reg) => {
             reg.update();
             if (reg.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+            reg.addEventListener("updatefound", () => {
+              const nw = reg.installing;
+              if (!nw) return;
+              nw.addEventListener("statechange", () => {
+                // 新 SW 已安装并等待：立即接管，触发上面的 controllerchange 完成刷新
+                if (nw.state === "installed" && navigator.serviceWorker.controller) {
+                  nw.postMessage({ type: "SKIP_WAITING" });
+                }
+              });
+            });
           })
           .catch(() => {});
       });
@@ -7508,19 +7696,36 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       } catch(e) {}
     }
 
-    // 历史消息分页渲染：长会话（数百条）一次性 markdown 重绘会卡死主线程，
-    // 这里默认只渲染最近 HIST_PAGE 条，更早的按需展开。
-    let historyCache = { sid: "", msgs: [], startIdx: 0, sig: "" };
-    const HIST_PAGE = 80;
+    // 历史消息分页渲染：长会话全量可达十几 MB，一次性传输 / JSON.parse / 重绘会超时卡死。
+    // 网关 /api/messages 支持 limit/offset（offset 从尾部计），这里只维护一个"最近窗口"，
+    // 需要更早内容时再按需向上翻页。
+    let historyCache = { sid: "", msgs: [], total: 0, loadedFrom: 0, sig: "" };
+    const HIST_PAGE = 50;
 
-    // 会话内容指纹：用于"切页面回来"的静默对账，判断是否真的需要重绘
-    function histSig(msgs) {
-      if (!Array.isArray(msgs) || !msgs.length) return "0";
+    // 会话内容指纹：用于"切页面回来"的静默对账，判断是否真的需要重绘。
+    // 纳入 total，保证"来了新消息"一定改变指纹。
+    function histSig(total, msgs) {
+      if (!Array.isArray(msgs) || !msgs.length) return (total || 0) + "|0";
       const last = msgs[msgs.length - 1];
       const li = (last && last.info) || {};
       const parts = (last && last.parts) || [];
       const lp = parts[parts.length - 1] || {};
-      return msgs.length + "|" + (li.id || "") + "|" + (li.finish || "") + "|" + parts.length + "|" + ((lp.text || "").length);
+      return (total || 0) + "|" + (li.id || "") + "|" + (li.finish || "") + "|" + parts.length + "|" + ((lp.text || "").length);
+    }
+
+    // 取一页：返回 {msgs, total, start}，并兼容网关未分页时的全量数组响应
+    async function fetchHistoryPage(sid, limit, offset, signal) {
+      const url = "/api/messages?session_id=" + encodeURIComponent(sid) +
+                  "&limit=" + limit + "&offset=" + offset;
+      const r = await fetch(url, signal ? { signal } : undefined);
+      const j = await r.json();
+      if (Array.isArray(j)) {
+        const total = j.length;
+        const end = Math.max(0, total - offset);
+        const start = limit ? Math.max(0, end - limit) : 0;
+        return { msgs: j.slice(start, end), total, start };
+      }
+      return { msgs: j.messages || [], total: j.total || 0, start: j.start || 0 };
     }
 
     async function loadHistoricalMessages(sid, showLoader = false, silent = false) {
@@ -7533,20 +7738,19 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
       try {
         const ctrl = new AbortController();
-        const to = setTimeout(() => ctrl.abort(), 12000);
-        let msgs;
+        const to = setTimeout(() => ctrl.abort(), 25000);
+        let page;
         try {
-          const r = await fetch("/api/messages?session_id=" + encodeURIComponent(sid), { signal: ctrl.signal });
-          msgs = await r.json();
+          page = await fetchHistoryPage(sid, HIST_PAGE, 0, ctrl.signal);
         } finally { clearTimeout(to); }
 
-        const sig = histSig(msgs);
+        const sig = histSig(page.total, page.msgs);
         if (silent && historyCache.sid === sid && sig === historyCache.sig) {
           return; // 无变化：保持当前画面，不重绘、不闪加载态
         }
 
-        if (!Array.isArray(msgs) || msgs.length === 0) {
-          historyCache = { sid, msgs: [], startIdx: 0, sig };
+        if (!page.total) {
+          historyCache = { sid, msgs: [], total: 0, loadedFrom: 0, sig };
           if (!silent) {
             vp.innerHTML = `
               <div class="msg-assistant-container">
@@ -7555,8 +7759,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           }
           return;
         }
-        historyCache = { sid, msgs, startIdx: Math.max(0, msgs.length - HIST_PAGE), sig };
-        renderHistoryRange(historyCache.msgs, historyCache.startIdx, true);
+        historyCache = { sid, msgs: page.msgs, total: page.total, loadedFrom: page.start, sig };
+        await renderHistoryRange(historyCache.msgs, historyCache.loadedFrom > 0, true);
       } catch(e) {
         if (silent) return; // 静默对账失败不打扰当前画面
         const isAbort = e && (e.name === "AbortError" || /abort/i.test(String(e)));
@@ -7564,18 +7768,35 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       }
     }
 
-    function expandHistory() {
-      const { msgs, startIdx } = historyCache;
-      const nextStart = Math.max(0, startIdx - HIST_PAGE);
-      historyCache.startIdx = nextStart;
-      renderHistoryRange(msgs, nextStart, false);
+    // 向上翻页：再取更早的 HIST_PAGE 条，前置拼接后重绘，并尽量保持原视口位置
+    let expandingHistory = false;
+    async function expandHistory() {
+      if (expandingHistory) return;
+      const { sid, total, loadedFrom } = historyCache;
+      if (loadedFrom <= 0) return;
+      expandingHistory = true;
+      const vp = document.getElementById("chat-viewport");
+      const prevHeight = vp ? vp.scrollHeight : 0;
+      try {
+        const skip = total - loadedFrom; // 从尾部跳过已加载的部分
+        const page = await fetchHistoryPage(sid, HIST_PAGE, skip, null);
+        historyCache.msgs = page.msgs.concat(historyCache.msgs);
+        historyCache.loadedFrom = page.start;
+        await renderHistoryRange(historyCache.msgs, historyCache.loadedFrom > 0, false);
+        if (vp) vp.scrollTop = vp.scrollHeight - prevHeight;
+      } catch (e) {
+        // 翻页失败不打扰当前画面
+      } finally {
+        expandingHistory = false;
+      }
     }
 
-    function renderHistoryRange(msgs, startIdx, atBottom) {
+    async function renderHistoryRange(msgs, hasEarlier, atBottom) {
       const vp = document.getElementById("chat-viewport");
       const sid = historyCache.sid;
       vp.innerHTML = "";
       let renderedCount = 0;
+      let yieldCounter = 0;
 
       // 判定当前最新一条消息是否正处于运行状态（基于全量最后一条）
       const lastMsg = msgs[msgs.length - 1];
@@ -7615,18 +7836,21 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         }
       }
 
-      // 更早消息展开入口
-      if (startIdx > 0) {
+      // 更早消息展开入口（窗口之前仍有未加载的历史时显示）
+      if (hasEarlier) {
         const more = document.createElement("div");
         more.className = "msg-assistant-container";
         more.style.textAlign = "center";
-        more.innerHTML = `<button class="btn-load-earlier" onclick="expandHistory()">↑ 加载更早的 ${startIdx} 条对话</button>`;
+        more.innerHTML = `<button class="btn-load-earlier" onclick="expandHistory()">↑ 加载更早的 ${historyCache.loadedFrom} 条对话</button>`;
         vp.appendChild(more);
       }
 
       let curAssistantWrap = null;
 
-      for (let idx = startIdx; idx < msgs.length; idx++) {
+      for (let idx = 0; idx < msgs.length; idx++) {
+        // 分批让出主线程：数十条含 markdown/工具卡的重绘若一口气同步完成，
+        // 低端机会短暂"卡住"。每 ~10 条让浏览器喘口气（先绘制、再续渲染）。
+        if (yieldCounter++ % 10 === 0) await new Promise(r => setTimeout(r, 0));
         const m = msgs[idx];
         const role = m.info?.role || "assistant";
         const isLast = (idx === msgs.length - 1);
@@ -7738,21 +7962,85 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       return wrap;
     }
 
-    let activeTextCard = null;
-    let activeTextPartId = null;
-    let pendingRenderRaf = null;
-    let pendingRenderCard = null;
-    let pendingRenderText = "";
+    // ── LiveTurn：流式回合的文本状态模型 ─────────────────────────────
+    // 引擎事件语义（live capture 确认）：
+    //   ui.text 带真实 partID          → 该 part 的「增量」delta，应追加
+    //   ui.text / text-partial 无 partID → 当前 part 的「累积快照」snapshot，应整体覆盖
+    // 因此为「当前开放文本段」维护一份 buffer：delta 累加、snapshot 取较长者（自愈，
+    // 不怕 delta 与 snapshot 交错或快照滞后）。每段一张 data-part-id 卡片，与工具/思考
+    // 卡片按到达顺序插入容器 —— DOM 顺序即最终呈现顺序。回合结束(idle)后由
+    // loadHistoricalMessages 以 /api/messages 权威结果对账，杜绝任何漂移。
+    const liveTurn = { openId: null, buffer: "", raf: null, seg: 0 };
 
-    function flushProseRender() {
-      if (pendingRenderRaf) {
-        cancelAnimationFrame(pendingRenderRaf);
-        pendingRenderRaf = null;
-        if (pendingRenderCard && pendingRenderText !== undefined) {
-          pendingRenderCard.innerHTML = renderMarkdownSafe(pendingRenderText);
-          smartScrollToBottom();
-        }
+    function liveReset() {
+      if (liveTurn.raf) { cancelAnimationFrame(liveTurn.raf); liveTurn.raf = null; }
+      liveTurn.openId = null;
+      liveTurn.buffer = "";
+      liveTurn.seg = 0;
+    }
+
+    function liveFlush() {
+      if (liveTurn.raf) { cancelAnimationFrame(liveTurn.raf); liveTurn.raf = null; }
+      liveRender();
+    }
+
+    function liveRender() {
+      liveTurn.raf = null;
+      if (!activeAssistantBox || !liveTurn.openId) return;
+      const card = appendProseCard(activeAssistantBox, liveTurn.openId);
+      card.innerHTML = renderMarkdownSafe(liveTurn.buffer);
+      card.dataset.rawText = liveTurn.buffer;
+      card.dataset.rawLength = String(liveTurn.buffer.length);
+      smartScrollToBottom();
+    }
+
+    function liveSchedule() {
+      if (!liveTurn.raf) liveTurn.raf = requestAnimationFrame(liveRender);
+    }
+
+    // 开始新的开放文本段（realId 存在则用真实 partID，否则用合成段号）
+    function liveOpenSegment(realId) {
+      if (realId) {
+        liveTurn.openId = realId;
+      } else {
+        liveTurn.seg += 1;
+        liveTurn.openId = "__seg" + liveTurn.seg;
       }
+      liveTurn.buffer = "";
+    }
+
+    // 收到真实 partID 的增量
+    function liveTextDelta(partId, chunk) {
+      if (typeof chunk !== "string" || !chunk) return;
+      stallMigrateCount = 0;   // 收到真实流式文本 → 引擎活着，清零无响应计数
+      unsquelchDeadTurn();     // 死轮次静音后引擎又出字（真恢复/新回合）→ 恢复运行态显示
+      if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
+      removeThinkingIndicator(activeAssistantBox);
+      collapseThinking(activeAssistantBox);
+      if (liveTurn.openId !== partId) {
+        liveFlush();                 // 结算上一段，避免其尾部被覆盖丢失
+        liveOpenSegment(partId);     // 新 part → 新卡片
+      }
+      liveTurn.buffer += chunk;
+      liveSchedule();
+    }
+
+    // 收到无 partID 的累积快照（text-partial 或结束态 ui.text）
+    // 关键：快照永远是"当前开放文本段"的权威累积全文。引擎会把上一段（工具前）的
+    // 快照在新段开始/工具边界后继续重放若干帧 —— 若盲目按"更长即覆盖"处理，会用
+    // 陈旧内容覆盖已切换的新段（等长不同文本尤其致命）。因此只在快照与当前段前缀
+    // 一致时才应用（取更长者），否则视为跨段陈旧重放直接忽略。
+    function liveTextSnapshot(text) {
+      if (typeof text !== "string" || !text) return;
+      if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
+      removeThinkingIndicator(activeAssistantBox);
+      collapseThinking(activeAssistantBox);
+      if (!liveTurn.openId) liveOpenSegment(null); // 纯快照流（无 delta）：独立成段
+      const cur = liveTurn.buffer;
+      const consistent = cur.length === 0 || text.startsWith(cur) || cur.startsWith(text);
+      if (!consistent) return;                     // 与当前段无关：陈旧/跨段重放，忽略
+      if (text.length >= cur.length) liveTurn.buffer = text;
+      liveSchedule();
     }
 
     function appendProseCard(wrap, partId) {
@@ -7771,32 +8059,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       return c;
     }
 
-    function updateProseContent(card, fullText) {
-      if (!card) return;
-      card.dataset.rawText = fullText;
-      card.dataset.rawLength = String(fullText.length);
-
-      // 单槽 RAF：切换到另一张卡片前，先把上一张待渲染卡片立即落盘，
-      // 避免同一回合内 text→工具→text 交替时，前一张卡片的尾部内容被覆盖丢失。
-      if (pendingRenderCard && pendingRenderCard !== card && pendingRenderRaf) {
-        cancelAnimationFrame(pendingRenderRaf);
-        pendingRenderRaf = null;
-        pendingRenderCard.innerHTML = renderMarkdownSafe(pendingRenderText);
-      }
-      pendingRenderCard = card;
-      pendingRenderText = fullText;
-
-      if (!pendingRenderRaf) {
-        pendingRenderRaf = requestAnimationFrame(() => {
-          pendingRenderRaf = null;
-          if (pendingRenderCard) {
-            pendingRenderCard.innerHTML = renderMarkdownSafe(pendingRenderText);
-            smartScrollToBottom();
-          }
-        });
-      }
-    }
-
     function addProseText(wrap, text, partId) {
       const c = appendProseCard(wrap, partId);
       c.innerHTML = renderMarkdownSafe(text);
@@ -7804,45 +8066,6 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       c.dataset.rawLength = String((text || "").length);
       smartScrollToBottom();
       return c;
-    }
-
-    // 流式文本落卡：引擎的 text-partial / ui.text 常不带稳定 partID，
-    // 且同一 part 的全文会被反复（含跨工具边界）重发。若按"每次新建 default 卡"
-    // 处理，就会把同一段叙述复制成多张卡。这里按"是否为当前文本的延续"决定复用还是新建。
-    function applyStreamText(text, partId) {
-      if (typeof text !== "string") return;
-      // 跨来源/跨 partID 内容去重：引擎可能把同一段叙述以不同（或空）partID 重发，
-      // 历史对账与实时 SSE 也可能各画一份。若视口里已有完全相同的一段，复用那张卡，杜绝重复。
-      const vp = document.getElementById("chat-viewport");
-      if (vp && text.trim()) {
-        const dup = Array.from(vp.querySelectorAll(".assistant-prose-card")).find(c => (c.dataset.rawText || "") === text);
-        if (dup) {
-          const container = dup.closest(".msg-assistant-container");
-          if (container) activeAssistantBox = container;
-          activeTextCard = dup;
-          return;
-        }
-      }
-      if (!activeAssistantBox) activeAssistantBox = appendAssistantBox();
-      removeThinkingIndicator(activeAssistantBox);
-      collapseThinking(activeAssistantBox);
-      let card = null;
-      if (partId && partId !== "default") {
-        card = appendProseCard(activeAssistantBox, partId); // 按 partId 去重复用
-        activeTextPartId = partId;
-      } else {
-        const cards = activeAssistantBox.querySelectorAll(".assistant-prose-card");
-        const last = cards.length ? cards[cards.length - 1] : null;
-        const cur = last ? (last.dataset.rawText || "") : "";
-        if (last && (text === cur || (text.length >= cur.length && text.startsWith(cur)))) {
-          card = last; // 同一 part 累积增长（含工具边界后重发）→ 复用，杜绝重复
-        } else {
-          card = appendProseCard(activeAssistantBox, null); // 新段落 → 新建
-          activeTextPartId = null;
-        }
-      }
-      activeTextCard = card;
-      updateProseContent(card, text);
     }
 
     // ── 深度思考展示与自动折叠 ─────────────────────────────────
@@ -7901,9 +8124,11 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     function paintTaskLiveUI() {
       const elapsed = formatElapsed(Date.now() - (busyStartTime || Date.now()));
       const topE = document.getElementById("task-live-top-elapsed");
-      if (topE) topE.textContent = elapsed;
+      if (topE) topE.textContent = questionPending ? "· 等你作答" : elapsed;
       const th = document.getElementById("active-thinking-indicator");
-      if (th) th.innerHTML = '正在工作 · 已处理 ' + elapsed + '<span class="dot-pulse">...</span>';
+      if (th) th.innerHTML = questionPending
+        ? '引擎在等你回话，点选项或直接在输入框里回复<span class="dot-pulse">...</span>'
+        : '正在工作 · 已处理 ' + elapsed + '<span class="dot-pulse">...</span>';
     }
 
     function startTaskLiveUI() {
@@ -7944,6 +8169,63 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       if (el) el.remove();
     }
 
+    // 引擎的 question 工具：它要用户拍板。这里只做展示——点选项即把该选项文字
+    // 填进输入框，用户想改就改，然后当普通消息发出去继续对话。
+    function renderQuestionCard(wrap, callId, status, inputData) {
+      if (!wrap) return;
+      let card = activeToolsMap[callId];
+      if (!card) {
+        card = document.createElement("div");
+        card.className = "mimo-question-card";
+        wrap.appendChild(card);
+        activeToolsMap[callId] = card;
+      }
+      const done = status === "completed" || status === "error" || status === "failed";
+      card.classList.toggle("answered", done);
+      const qs = (inputData && Array.isArray(inputData.questions)) ? inputData.questions : [];
+      // 引擎会反复推同一 callID 的帧（历史渲染也会重画），选中态存在卡片上以免被冲掉
+      let sel = {};
+      try { sel = JSON.parse(card.dataset.sel || "{}") || {}; } catch (_) { sel = {}; }
+      card.dataset.callid = callId || "";
+
+      let html = '<div class="mq-head">' + (done ? "已回答" : "🙋 引擎要你拍板") + '</div>';
+      qs.forEach(function (q, qi) {
+        const label = q.header ? '<span class="mq-q-label">' + escapeHtml(q.header) + '：</span>' : '';
+        html += '<div class="mq-q">' + label + escapeHtml(q.question || "") + '</div>';
+        (q.options || []).forEach(function (o, oi) {
+          const text = (o && (o.label || o.text)) || String(o || "");
+          const desc = o && o.description ? '<span class="mq-opt-desc">' + escapeHtml(o.description) + '</span>' : '';
+          const on = String(sel[qi]) === String(oi);
+          html += '<button class="mq-opt' + (on ? ' selected' : '') + '" data-q="' + qi + '" data-o="' + oi +
+                  '" data-text="' + escapeHtml(text) + '">' +
+                  '<span class="mq-opt-label">' + escapeHtml(text) + '</span>' + desc + '</button>';
+        });
+      });
+      card.innerHTML = html;
+
+      card.querySelectorAll(".mq-opt").forEach(function (b) {
+        b.onclick = function (ev) {
+          ev.stopPropagation();
+          const qi = b.dataset.q;
+          card.querySelectorAll('.mq-opt[data-q="' + qi + '"]').forEach(function (x) { x.classList.remove("selected"); });
+          b.classList.add("selected");
+          sel[qi] = b.dataset.o;
+          card.dataset.sel = JSON.stringify(sel);
+          const input = document.getElementById("dock-input");
+          if (input) {
+            const text = b.dataset.text || "";
+            const cur = input.value.trim();
+            // 已经在输入框里说过的话别被顶掉，追加即可
+            input.value = (cur && cur !== text) ? (cur + "\\n" + text) : text;
+            input.focus();
+          }
+        };
+      });
+      questionPending = !done;
+      paintSendButton();
+      smartScrollToBottom();
+    }
+
     // ── 终端工具执行卡片 (1:1 对齐电脑端：意图优先、单行收敛、拒绝爆屏) ─
     function addToolCard(wrap, callId, tool, status, inputData, outputData, extraDesc = "") {
       let card = activeToolsMap[callId];
@@ -7955,6 +8237,11 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       // 1. 意图描述优先提取（对齐电脑端：如“汇总单测并组装 debug APK”）
       let desc = extraDesc || inputData?.description || inputData?.summary || "";
       const tName = (tool || "TOOL").toLowerCase();
+
+      if (tName.includes("question") || tName.includes("ask_user")) {
+        renderQuestionCard(wrap, callId, status, inputData);
+        return;
+      }
 
       if (!desc) {
         if (typeof inputData === "string") {
@@ -8090,15 +8377,43 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     function startBusyWatch(sid) {
       stopBusyWatch();
       let count = 0;
+      let quietTicks = 0;      // 连续多少轮"内容零推进"，判死回合用
+      let advanceSig = null;
       busyPollTimer = setInterval(async () => {
         if (!isBusy) {
           stopBusyWatch();
           return;
         }
         count++;
+        // ── 引擎无响应兜底（SSE 心跳超时）──
+        // 本机发起的回合，若长时间收不到任何 SSE 帧(连 busy 心跳都没有)，说明该会话 runner
+        // 已死(典型：旧构建会话被当前引擎静默吞掉/卡住，abort 也 404)。打破"正在工作"死转圈，
+        // 自动切到新会话重发原文；连续多次仍无响应则停手并明确提示，避免无限建会话。
+        if (localStreamTurn && lastSseEventTs && (Date.now() - lastSseEventTs > 20000)) {
+          lastSseEventTs = 0;  // 复位，本 tick 只处理一次
+          stopBusyWatch();
+          if (pendingSend && stallMigrateCount < 2) {
+            stallMigrateCount++;
+            const resend = pendingSend;
+            await migrateSwallowedSend(resend, "引擎对上一条消息无响应(会话疑似失效)，已自动切换到新会话重新发送。");
+          } else {
+            removeThinkingIndicator(activeAssistantBox);
+            collapseThinking(activeAssistantBox);
+            addProseText(activeAssistantBox, "⚠️ 引擎对这条消息长时间无响应。这条会话可能已失效，请点击左上角「+」新建任务后重试。");
+            setBusy(false);
+            localStreamTurn = false;
+            pendingSend = null;
+            activeAssistantBox = null;
+            liveReset();
+            activeToolsMap = {};
+          }
+          return;
+        }
         try {
-          const r = await fetch("/api/messages?session_id=" + sid);
-          const msgs = await r.json();
+          // 运行态轮询只需最近若干条判断是否完成，避免反复拉全量大会话
+          const r = await fetch("/api/messages?session_id=" + encodeURIComponent(sid) + "&limit=20&offset=0");
+          const j = await r.json();
+          const msgs = Array.isArray(j) ? j : (j.messages || []);
           if (Array.isArray(msgs) && msgs.length > 0) {
             const last = msgs[msgs.length - 1];
             const info = last.info || {};
@@ -8126,22 +8441,62 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             if (info.role === "assistant") {
               const parts = last.parts || [];
               const hasRunningTool = parts.some(p => p.type === "tool" && p.state?.status === "running");
-              const isDone = (info.finish === "stop" || (info.time && info.time.completed)) && !hasRunningTool;
+              const finished = (info.finish === "stop" || (info.time && info.time.completed)) && !hasRunningTool;
+              // 发送后引擎尚未落库本轮，last 可能还是"上一轮已完成"的旧回复。
+              // 用"消息身份"判断是否已出现本轮的新回复（id 与发送瞬间记录的不同），
+              // 绝不用跨设备墙钟比较（手机/电脑时钟偏差会误杀 → 30s 都不出字）。
+              const curId = info.id || last.id || "";
+              const isNewReply = !preSendLastMsgId || curId !== preSendLastMsgId;
+              const isDone = finished && isNewReply;
               if (isDone) {
                 pendingSend = null;
                 stopBusyWatch();
                 removeThinkingIndicator(activeAssistantBox);
                 collapseThinking(activeAssistantBox);
-                flushProseRender();
+                liveFlush();
                 setBusy(false);
+                localStreamTurn = false;
                 activeAssistantBox = null;
-                activeTextCard = null;
-                activeTextPartId = null;
+                liveReset();
                 activeToolsMap = {};
-                loadHistoricalMessages(sid, false);
+                loadHistoricalMessages(sid, false, true);
                 loadSessionsList();
                 updateContextUsage(sid);
               } else {
+                // ── 死轮次检测（解锁不可用会话）──
+                // 引擎收下这轮后 runner 再没吐过任何字节（典型：会话被失效引擎吞掉、或桌面端
+                // 重启后残留的未收尾 assistant 消息）。此时 is_busy 恒为真、输入框锁死，整个会话
+                // 不可用。判据是"内容指纹是否推进"而不是墙钟：指纹长时间不动 = 这轮已经死了。
+                const sig = curId + "|" + parts.length + "|" + String(info.finish) + "|" +
+                            String(info.time && info.time.completed) + "|" +
+                            parts.reduce((n, p) => n + ((p.text || "").length), 0);
+                if (sig === advanceSig) quietTicks++; else { advanceSig = sig; quietTicks = 0; }
+                const turnAge = busyStartTime ? (Date.now() - busyStartTime) : 0;
+                // 有工具还挂在 running：多半是引擎在等你回应（question 选择题、审批），
+                // 那是"等你"不是"死了"，措辞必须区分，否则会把人引去重发/新建。
+                const pendingAsk = parts.some(p => p.type === "tool" && p.state?.status === "running");
+                if (quietTicks >= 150 || (turnAge > 15 * 60 * 1000 && quietTicks >= 3)) {
+                  stopBusyWatch();
+                  removeThinkingIndicator(activeAssistantBox);
+                  collapseThinking(activeAssistantBox);
+                  const firstNotice = deadTurnSid !== sid;
+                  deadTurnSid = sid;
+                  deadTurnSquelched = true;
+                  setBusy(false);
+                  localStreamTurn = false;
+                  pendingSend = null;
+                  activeAssistantBox = null;
+                  liveReset();
+                  activeToolsMap = {};
+                  if (firstNotice) {
+                    // 只对同一条失效轮次提示一次；先对账再落提示，否则会被整屏重绘冲掉
+                    await loadHistoricalMessages(sid, false, true);
+                    addProseText(null, pendingAsk
+                      ? "⏳ 这一步停在某个工具上没有继续 —— 多半是引擎在等你回应（选择题 / 审批）。请到电脑端 MiMo 上点选作答；这里也已解锁输入，你可以直接把选择写成消息发过来。"
+                      : "⚠️ 上一轮已失效（引擎对这轮再没有任何输出），已解锁输入。可以直接重发消息，或点左上角「+」新建任务。");
+                  }
+                  return;
+                }
                 // 运行中持续校验真实轮次开始时间，防止时间偏差
                 const parentId = info.parentID;
                 let tStart = 0;
@@ -8187,7 +8542,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       const skipUserBubble = !!opts.skipUserBubble;
       const text = (message || "").trim();
       if (!text && !(files && files.length)) return;
-      if (isBusy) return;
+      if (isBusy && !questionPending) return;   // 选择题挂起时 busy 也要放行，让"点选项→发消息"能接上话
 
       if (navigator.vibrate) navigator.vibrate(12);
 
@@ -8216,13 +8571,20 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
       const promptNow = Date.now();
       busyStartTime = promptNow;
+      unsquelchDeadTurn();  // 本机重新发起回合：解除上一死轮次的静音，运行态正常显示
       setBusy(true, promptNow);
 
       activeAssistantBox = appendAssistantBox();
-      activeTextCard = null;
-      activeTextPartId = null;
+      localStreamTurn = true;   // 本机发起这一轮：完成后信任实时视图，不重刷历史
+      // 记录发送瞬间"最后一条消息 id"，供看门狗判断"是否出现了本轮新回复"，
+      // 用消息身份而非跨设备墙钟比较（手机与电脑时钟可能有偏差，墙钟闸门会误杀）。
+      preSendLastMsgId = (historyCache.msgs && historyCache.msgs.length)
+        ? ((historyCache.msgs[historyCache.msgs.length - 1].info || {}).id || "")
+        : "";
+      liveReset();
       activeToolsMap = {};
       showThinkingIndicator(activeAssistantBox);
+      lastSseEventTs = Date.now();   // 起算存活时间：若整轮无任何 SSE 帧，看门狗据此判引擎无响应
 
       if (!activeSseSource || activeSseSource.readyState === EventSource.CLOSED) {
         connectSessionSSE(currentSessionId);
@@ -8241,6 +8603,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             perm: selectedPerm,
             files: filePaths,
             think: currentThink,
+            saw_question: !!document.querySelector(".mimo-question-card"),
             directory: currentWorkdir || undefined
           })
         });
@@ -8299,7 +8662,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
     async function sendPrompt() {
       const input = document.getElementById("dock-input");
       const text = input.value.trim();
-      if ((!text && !attachedFiles.length) || isBusy) return;
+      // 引擎的选择题挂起时会话虽然处于 busy，但用户必须能直接把话发出去
+      if ((!text && !attachedFiles.length) || (isBusy && !questionPending)) return;
       await dispatchChat(text, attachedFiles, { skipUserBubble: false });
     }
 
@@ -8314,12 +8678,20 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         startTaskLiveUI();
       } else {
         busyStartTime = 0;
+        questionPending = false;   // 不忙了就不该还挂着"等你作答"
         stopBusyWatch();
         removeThinkingIndicator(activeAssistantBox);
         stopTaskLiveUI();
       }
+      paintSendButton();
+    }
+
+    // 发送键三态：忙碌时是"停止"；但若是引擎的选择题挂起（questionPending），
+    // 用户必须能直接把答案发出去，所以此时恢复成"发送"。
+    function paintSendButton() {
       const btn = document.getElementById("btn-dock-send");
-      if (busy) {
+      if (!btn) return;
+      if (isBusy && !questionPending) {
         btn.classList.add("abort");
         btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
         btn.onclick = abortTask;
@@ -8338,23 +8710,27 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
       stopBusyWatch();
       removeThinkingIndicator(activeAssistantBox);
       collapseThinking(activeAssistantBox);
-      flushProseRender();
+      liveFlush();
       try {
         await fetch("/api/abort", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ session_id: currentSessionId })
         });
-        if (activeTextCard) activeTextCard.innerHTML += "<br><em>[已发送 Abort 中止信号]</em>";
+        if (activeAssistantBox && liveTurn.openId) {
+          const c = activeAssistantBox.querySelector(`.assistant-prose-card[data-part-id="${liveTurn.openId}"]`);
+          if (c) c.innerHTML += "<br><em>[已发送 Abort 中止信号]</em>";
+        }
       } catch (e) {}
       setBusy(false);
       activeAssistantBox = null;
-      activeTextCard = null;
-      activeTextPartId = null;
+      localStreamTurn = false;
+      liveReset();
       activeToolsMap = {};
     }
 
     function markTaskRunning(sid, actualStartTime) {
+      if (deadTurnSquelched && sid && sid === deadTurnSid) return;  // 死轮次残留的 busy 心跳不再点亮"工作中"
       if (actualStartTime && actualStartTime > 0 && actualStartTime <= Date.now()) {
         if (!busyStartTime || actualStartTime < busyStartTime || !isBusy) {
           busyStartTime = actualStartTime;
@@ -8378,6 +8754,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
       const handleEvt = function(e) {
         if (activeSseSource._sid !== sid) return;
+        lastSseEventTs = Date.now();   // 任何帧(含心跳)都刷新存活时间，供看门狗判活
         let ev;
         try { ev = JSON.parse(e.data); } catch(_) { return; }
         const type = ev.type || e.type;
@@ -8389,10 +8766,10 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           removeThinkingIndicator(activeAssistantBox);
           addThinking(activeAssistantBox, ev.text, true);
 
-        // ── 2. 文本流（累积全文，平滑流畅渲染）
+        // ── 2. 文本流（无 partID 的累积快照）
         } else if (type === "text-partial" && typeof ev.text === "string") {
           markTaskRunning(sid);
-          applyStreamText(ev.text, activeTextPartId);
+          liveTextSnapshot(ev.text);
 
         // ── 3. ui 事件（tool / text / title / usage / reasoning）
         } else if (type === "ui" && ev.ui) {
@@ -8401,7 +8778,8 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
           if (ui.kind === "text") {
             markTaskRunning(sid);
-            applyStreamText(ui.text, ui.partID);
+            if (ui.partID) liveTextDelta(ui.partID, ui.text); // 带真实 partID → 增量
+            else liveTextSnapshot(ui.text);                    // 结束态全文 → 快照
 
           } else if (ui.kind === "reasoning" || ui.kind === "thought" || ui.kind === "thinking") {
             markTaskRunning(sid);
@@ -8413,13 +8791,18 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
           } else if (ui.kind === "tool") {
             markTaskRunning(sid);
             removeThinkingIndicator(activeAssistantBox);
-            flushProseRender();
-            activeTextCard = null;
-            activeTextPartId = null;
+            liveFlush();          // 结算当前文本段（卡片留在工具卡之前）
+            // 注意：不清空 openId —— 工具后若再来文本，其首个信号必是带新 partID 的 delta，
+            // 会自然另起新卡；而引擎此时常继续重放上一段的陈旧快照，保留 openId 可让它们
+            // 命中同一张已渲染卡片（内容一致、无害），而非误开一张重复卡。
 
             const out = ui.output || "";
             const desc = ui.description || ui.metadata?.description || ui.input?.description || ui.input?.summary || "";
+            unsquelchDeadTurn();  // 工具真的在动 → 该会话又有活干了，解除死轮次静音
             addToolCard(activeAssistantBox, ui.callID, ui.tool, ui.status, ui.input, out, desc);
+            // 工具收尾后引擎要再跑一轮推理才吐正文，这段空窗（实测 3~15s）里满屏都是"已完成"，
+            // 看起来像卡住。补回"正在工作"脉冲，下一条文本/思考到达时会被自动摘掉。
+            if (ui.status && ui.status !== "running") showThinkingIndicator(activeAssistantBox);
 
           } else if (ui.kind === "title") {
             const titleEl = document.getElementById("top-session-title");
@@ -8438,14 +8821,22 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
         } else if (type === "idle" || type === "session.idle") {
           removeThinkingIndicator(activeAssistantBox);
           collapseThinking(activeAssistantBox);
-          flushProseRender();
+          liveFlush();
           setBusy(false);
+          const localDone = localStreamTurn && activeAssistantBox;
+          localStreamTurn = false;
+          if (localDone) {
+            // 本机刚流式完成这一轮：就地收尾，保留实时视图，不整屏重刷历史。
+            appendFeedbackRow(activeAssistantBox);  // 内部已去重
+            historyCache.sig = "";  // 令下次“回前台静默对账”以权威数据重绘，保证最终一致
+          }
           activeAssistantBox = null;
-          activeTextCard = null;
-          activeTextPartId = null;
+          liveReset();
           activeToolsMap = {};
           stopBusyWatch();
-          loadHistoricalMessages(sid, false);
+          // 静默对账：引擎的 SSE 流每 20 秒左右会自然结束一次，浏览器随即重连并重放终态 idle。
+          // 若这里做整屏重绘，画面就会"每隔几秒刷一次"。silent 仅在内容指纹变化时才重绘。
+          if (!localDone) loadHistoricalMessages(sid, false, true);
           loadSessionsList();
           updateContextUsage(sid);
           loadSessionContext(sid);
@@ -8651,7 +9042,7 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
             selectedModelName = act.model.name || selectedModelName;
             updateDockModelLabel(act.model);
           }
-          if (act.is_busy && act.turn_start_time) {
+          if (act.is_busy && act.turn_start_time && !(deadTurnSquelched && deadTurnSid === act.id)) {
             busyStartTime = act.turn_start_time;
             setBusy(true, act.turn_start_time);
           }
@@ -8747,7 +9138,14 @@ XIAOMI_MIMO_PWA_HTML = """<!DOCTYPE html>
 
 class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass
+        try:
+            line = "%s" % (format % args)
+        except Exception:
+            line = str(format)
+        # 只记录关键收发链路，便于定位"消息是否真的到达网关"
+        if any(k in line for k in ("/api/chat", "/api/events", "/api/messages", "/api/active_session", "/sw.js", '"GET / ', '"GET /"')):
+            client = self.client_address[0] if self.client_address else "?"
+            print(f"[REQ] {client} {line}", flush=True)
 
     def send_json(self, code: int, data: Any):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -9030,6 +9428,12 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "plugins": items, "total": len(items)})
             return
 
+        # 诊断：桌面端 /v1 门面到底挂了哪些路由
+        elif path == "/api/engine/routes":
+            sid = query.get("session_id", [""])[0] or None
+            self.send_json(200, engine_route_scan(sid))
+            return
+
 
 
         # 7. 获取电脑当前正在焦点的最新会话
@@ -9153,7 +9557,51 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
             if not sid:
                 self.send_json(400, {"error": "缺少 session_id 参数"})
                 return
+
+            def _qi(key, default=0):
+                try:
+                    return int(query.get(key, [default])[0])
+                except (TypeError, ValueError):
+                    return default
+
+            limit = _qi("limit", 0)    # 0 = 全量（向后兼容）
+            offset = _qi("offset", 0)  # 从尾部往前跳过多少条
+
             code, data = call_mimo_v1(f"sessions/{sid}/messages")
+            # 精简：info.system 是每条用户消息重复携带的整段系统提示词（可达几十 KB/条），
+            # PWA 渲染器从不使用它，纯传输负担；剔除后长会话载荷显著变小，规避传输/解析超时。
+            def _prune(m):
+                if isinstance(m, dict):
+                    info = m.get("info")
+                    if isinstance(info, dict) and "system" in info:
+                        info = dict(info)
+                        info.pop("system", None)
+                        m = dict(m)
+                        m["info"] = info
+                return m
+
+            if code == 200 and isinstance(data, list):
+                data = [_prune(m) for m in data]
+
+            # 兼容旧客户端（未传 limit）：全量数组仍可能十几 MB，手机过网络会超时。
+            # 兜底裁到最近 LEGACY_MAX 条并以"纯数组"返回（旧 JS 只渲染末尾若干条，够用且不会破坏其结构）。
+            LEGACY_MAX = 120
+            if code == 200 and isinstance(data, list) and not limit and not offset and len(data) > LEGACY_MAX:
+                data = data[-LEGACY_MAX:]
+
+            # 长会话全量可达十几 MB，手机端传输 + JSON.parse 会超时。
+            # 带 limit/offset 时在网关侧切片，只回传最近/指定窗口。
+            if code == 200 and isinstance(data, list) and (limit or offset):
+                total = len(data)
+                end = max(0, total - offset)
+                start = max(0, end - limit) if limit else 0
+                data = {
+                    "messages": data[start:end],
+                    "total": total,
+                    "offset": offset,
+                    "limit": limit,
+                    "start": start,
+                }
             self.send_json(code, data)
             return
 
@@ -9352,6 +9800,8 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
 
                 # 卡死自愈：会话 runner 已 reentry 卡死时，自动迁移到新会话继续，不依赖重启桌面端
                 migrated_from = None
+                unlocked_from = None
+                unlock_reason = None
                 try:
                     if is_session_wedged(sid):
                         old_sid = sid
@@ -9377,6 +9827,30 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                     pass
 
                 files = payload.get("files", [])
+                # 未了结的选择题会毁掉这个会话的续用：还挂着时任何新消息被 busy 拒，被引擎放弃后
+                # 新消息虽然 202 但 runner 已废、引擎静默不吐字。两种情况都直接续接成新会话。
+                try:
+                    # 只有画面上确实出现过选择题卡片才去拉历史，免得每次发消息都全量取一遍
+                    _msgs = session_messages_raw(sid) if payload.get("saw_question") else []
+                    _lock = question_lock_state(_msgs)
+                    if _lock:
+                        unlock_reason = _lock
+                        old_sid = sid
+                        new_sess = create_new_mimo_session_in_db(
+                            title=(session_title(old_sid) or "续接任务"), directory=directory
+                        )
+                        new_sid = new_sess.get("id")
+                        if new_sid:
+                            msg = (
+                                "（上一会话的任务进行到下面这段，但引擎弹了选择题后没人能作答，"
+                                "现在在新会话里接着做。前情提要：\n" + resume_digest_of(_msgs) + "\n）\n\n"
+                                "我的答复：" + msg
+                            )
+                            sid, migrated_from, unlocked_from = new_sid, old_sid, old_sid
+                            set_desktop_focus_session(new_sid, directory=directory)
+                            print(f"[CHAT] 选择题了结于 {old_sid}，本条续接到 {new_sid}", flush=True)
+                except Exception:
+                    pass
                 think_mode = payload.get("think", None)
                 if think_mode is None:
                     think_mode = get_current_think()
@@ -9396,6 +9870,31 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                     method="POST",
                     body=req_body,
                 )
+                # 兜底：上面按消息判断时若拉取失败/恰好抢在题目出现之前，这里还会撞 busy，同样续接
+                if code == 409 and isinstance(res, dict) and res.get("code") == "busy":
+                    _msgs = session_messages_raw(sid)
+                    _lock = question_lock_state(_msgs)
+                    if _lock:
+                        unlock_reason = _lock
+                        old_sid = sid
+                        new_sess = create_new_mimo_session_in_db(
+                            title=(session_title(old_sid) or "续接任务"), directory=directory
+                        )
+                        new_sid = new_sess.get("id")
+                        if new_sid:
+                            req_body["message"] = (
+                                "（上一会话进行到下面这段，但引擎弹了选择题后没人能作答，"
+                                "现在在新会话里接着做。前情提要：\n" + resume_digest_of(_msgs) + "\n）\n\n"
+                                "我的答复：" + req_body["message"]
+                            )
+                            code, res = call_mimo_v1(
+                                f"sessions/{new_sid}/turns", method="POST", body=req_body
+                            )
+                            if 200 <= (code or 0) < 300:
+                                sid, migrated_from, unlocked_from = new_sid, old_sid, old_sid
+                                set_desktop_focus_session(new_sid, directory=directory)
+                                print(f"[CHAT] busy 兜底续接 {old_sid} -> {new_sid}", flush=True)
+                print(f"[CHAT] sid={sid} engine_code={code} resp={str(res)[:160]}", flush=True)
                 if not isinstance(res, dict):
                     res = {"error": str(res)}
                 elif "error" not in res and code >= 400:
@@ -9412,7 +9911,14 @@ class XiaomiMiMoPwaHandler(BaseHTTPRequestHandler):
                         res["migrated"] = True
                         res["session_id"] = sid
                         res["migrated_from"] = migrated_from
-                        res["warning"] = "检测到上一任务在该会话卡死，已自动新建会话继续执行，本条消息正常处理中。"
+                        if unlocked_from and unlock_reason == "abandoned":
+                            res["warning"] = ("上一会话那道选择题没能作答，引擎已经放弃它——再往这个会话发消息也不会响应。"
+                                              "已带上前情提要切到新会话继续，这条消息正常处理中。")
+                        elif unlocked_from:
+                            res["warning"] = ("上一会话的选择题还挂着等答案，而桌面端既不开放答题、也不开放中止，会话被锁死。"
+                                              "已带上前情提要切到新会话继续，这条消息正常处理中。")
+                        else:
+                            res["warning"] = "检测到上一任务在该会话卡死，已自动新建会话继续执行，本条消息正常处理中。"
                 self.send_json(code, res)
                 return
 

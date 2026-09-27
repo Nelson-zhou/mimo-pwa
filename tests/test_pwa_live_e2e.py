@@ -67,7 +67,8 @@ const EventSource = function() {
         runner_code = harness + "\n" + main_script
 
         res = subprocess.run(
-            ["node", "-e", runner_code],
+            ["node"],
+            input=runner_code,
             capture_output=True,
             text=True,
             timeout=5
